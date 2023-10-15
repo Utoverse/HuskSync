@@ -1,14 +1,20 @@
 /*
- * This file is part of HuskSync by William278. Do not redistribute!
+ * This file is part of HuskSync, licensed under the Apache License 2.0.
  *
  *  Copyright (c) William278 <will27528@gmail.com>
- *  All rights reserved.
+ *  Copyright (c) contributors
  *
- *  This source code is provided as reference to licensed individuals that have purchased the HuskSync
- *  plugin once from any of the official sources it is provided. The availability of this code does
- *  not grant you the rights to modify, re-distribute, compile or redistribute this source code or
- *  "plugin" outside this intended purpose. This license does not cover libraries developed by third
- *  parties that are utilised in the plugin.
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
  */
 
 package net.william278.husksync.util;
@@ -16,8 +22,8 @@ package net.william278.husksync.util;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import net.william278.husksync.HuskSync;
-import net.william278.husksync.data.UserDataSnapshot;
-import net.william278.husksync.player.User;
+import net.william278.husksync.data.DataSnapshot;
+import net.william278.husksync.user.User;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.*;
@@ -25,38 +31,37 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.text.SimpleDateFormat;
+import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 import java.util.StringJoiner;
 import java.util.logging.Level;
 
 /**
- * Utility class for dumping {@link UserDataSnapshot}s to a file or as a paste on the web
+ * Utility class for dumping {@link DataSnapshot}s to a file or as a paste on the web
  */
 public class DataDumper {
 
     private static final String LOGS_SITE_ENDPOINT = "https://api.mclo.gs/1/log";
 
     private final HuskSync plugin;
-    private final UserDataSnapshot dataSnapshot;
+    private final DataSnapshot.Packed snapshot;
     private final User user;
 
-    private DataDumper(@NotNull UserDataSnapshot dataSnapshot,
-                       @NotNull User user, @NotNull HuskSync implementor) {
-        this.dataSnapshot = dataSnapshot;
+    private DataDumper(@NotNull DataSnapshot.Packed snapshot, @NotNull User user, @NotNull HuskSync implementor) {
+        this.snapshot = snapshot;
         this.user = user;
         this.plugin = implementor;
     }
 
     /**
-     * Create a {@link DataDumper} of the given {@link UserDataSnapshot}
+     * Create a {@link DataDumper} of the given {@link DataSnapshot}
      *
-     * @param dataSnapshot The {@link UserDataSnapshot} to dump
+     * @param dataSnapshot The {@link DataSnapshot} to dump
      * @param user         The {@link User} whose data is being dumped
      * @param plugin       The implementing {@link HuskSync} plugin
-     * @return A {@link DataDumper} for the given {@link UserDataSnapshot}
+     * @return A {@link DataDumper} for the given {@link DataSnapshot}
      */
-    public static DataDumper create(@NotNull UserDataSnapshot dataSnapshot,
+    public static DataDumper create(@NotNull DataSnapshot.Packed dataSnapshot,
                                     @NotNull User user, @NotNull HuskSync plugin) {
         return new DataDumper(dataSnapshot, user, plugin);
     }
@@ -69,7 +74,7 @@ public class DataDumper {
     @Override
     @NotNull
     public String toString() {
-        return plugin.getDataAdapter().toJson(dataSnapshot.userData(), true);
+        return snapshot.asJson(plugin);
     }
 
     @NotNull
@@ -122,7 +127,7 @@ public class DataDumper {
     }
 
     /**
-     * Dump the {@link UserDataSnapshot} to a file and return the file name
+     * Dump the {@link DataSnapshot} to a file and return the file name
      *
      * @return the relative path of the file the data was dumped to
      */
@@ -176,11 +181,11 @@ public class DataDumper {
     @NotNull
     private String getFileName() {
         return new StringJoiner("_")
-                       .add(user.username)
-                       .add(new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss").format(dataSnapshot.versionTimestamp()))
-                       .add(dataSnapshot.cause().name().toLowerCase(Locale.ENGLISH))
-                       .add(dataSnapshot.versionUUID().toString().split("-")[0])
-               + ".json";
+                .add(user.getUsername())
+                .add(snapshot.getTimestamp().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")))
+                .add(snapshot.getSaveCause().name().toLowerCase(Locale.ENGLISH))
+                .add(snapshot.getShortId())
+                + ".json";
     }
 
 }

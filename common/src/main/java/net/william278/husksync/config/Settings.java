@@ -1,14 +1,20 @@
 /*
- * This file is part of HuskSync by William278. Do not redistribute!
+ * This file is part of HuskSync, licensed under the Apache License 2.0.
  *
  *  Copyright (c) William278 <will27528@gmail.com>
- *  All rights reserved.
+ *  Copyright (c) contributors
  *
- *  This source code is provided as reference to licensed individuals that have purchased the HuskSync
- *  plugin once from any of the official sources it is provided. The availability of this code does
- *  not grant you the rights to modify, re-distribute, compile or redistribute this source code or
- *  "plugin" outside this intended purpose. This license does not cover libraries developed by third
- *  parties that are utilised in the plugin.
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
  */
 
 package net.william278.husksync.config;
@@ -16,6 +22,11 @@ package net.william278.husksync.config;
 import net.william278.annotaml.YamlComment;
 import net.william278.annotaml.YamlFile;
 import net.william278.annotaml.YamlKey;
+import net.william278.husksync.data.DataSnapshot;
+import net.william278.husksync.data.Identifier;
+import net.william278.husksync.database.Database;
+import net.william278.husksync.listener.EventListener;
+import net.william278.husksync.sync.DataSyncer;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.*;
@@ -29,26 +40,43 @@ import java.util.*;
         ┃    Developed by William278   ┃
         ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
         ┣╸ Information: https://william278.net/project/husksync
-        ┗╸ Documentation: https://william278.net/docs/husksync""",
-        versionField = "config_version", versionNumber = 4)
+        ┣╸ Config Help: https://william278.net/docs/husksync/config-file/
+        ┗╸ Documentation: https://william278.net/docs/husksync""")
 public class Settings {
 
     // Top-level settings
+    @YamlComment("Locale of the default language file to use. Docs: https://william278.net/docs/husksync/translations")
     @YamlKey("language")
     private String language = "en-gb";
 
+    @YamlComment("Whether to automatically check for plugin updates on startup")
     @YamlKey("check_for_updates")
     private boolean checkForUpdates = true;
 
+    @YamlComment("Specify a common ID for grouping servers running HuskSync. "
+            + "Don't modify this unless you know what you're doing!")
     @YamlKey("cluster_id")
     private String clusterId = "";
 
+    @YamlComment("Enable development debug logging")
     @YamlKey("debug_logging")
     private boolean debugLogging = false;
 
+    @YamlComment("Whether to provide modern, rich TAB suggestions for commands (if available)")
+    @YamlKey("brigadier_tab_completion")
+    private boolean brigadierTabCompletion = false;
+
+    @YamlComment("Whether to enable the Player Analytics hook. Docs: https://william278.net/docs/husksync/plan-hook")
+    @YamlKey("enable_plan_hook")
+    private boolean enablePlanHook = true;
+
 
     // Database settings
-    @YamlComment("Database connection settings")
+    @YamlComment("Type of database to use (MYSQL, MARIADB)")
+    @YamlKey("database.type")
+    private Database.Type databaseType = Database.Type.MYSQL;
+
+    @YamlComment("Specify credentials here for your MYSQL or MARIADB database")
     @YamlKey("database.credentials.host")
     private String mySqlHost = "localhost";
 
@@ -65,9 +93,13 @@ public class Settings {
     private String mySqlPassword = "pa55w0rd";
 
     @YamlKey("database.credentials.parameters")
-    private String mySqlConnectionParameters = "?autoReconnect=true&useSSL=false";
+    private String mySqlConnectionParameters = "?autoReconnect=true"
+            + "&useSSL=false"
+            + "&useUnicode=true"
+            + "&characterEncoding=UTF-8";
 
-    @YamlComment("MySQL connection pool properties")
+    @YamlComment("MYSQL / MARIADB database Hikari connection pool properties. "
+            + "Don't modify this unless you know what you're doing!")
     @YamlKey("database.connection_pool.maximum_pool_size")
     private int mySqlConnectionPoolSize = 10;
 
@@ -83,12 +115,13 @@ public class Settings {
     @YamlKey("database.connection_pool.connection_timeout")
     private long mySqlConnectionPoolTimeout = 5000;
 
+    @YamlComment("Names of tables to use on your database. Don't modify this unless you know what you're doing!")
     @YamlKey("database.table_names")
     private Map<String, String> tableNames = TableName.getDefaults();
 
 
     // Redis settings
-    @YamlComment("Redis connection settings")
+    @YamlComment("Specify the credentials of your Redis database here. Set \"password\" to '' if you don't have one")
     @YamlKey("redis.credentials.host")
     private String redisHost = "localhost";
 
@@ -103,42 +136,87 @@ public class Settings {
 
 
     // Synchronization settings
-    @YamlComment("Synchronization settings")
-    @YamlKey("synchronization.max_user_data_snapshots")
-    private int maxUserDataSnapshots = 5;
+    @YamlComment("The mode of data synchronization to use (DELAY or LOCKSTEP). DELAY should be fine for most networks."
+            + " Docs: https://william278.net/docs/husksync/sync-modes")
+    @YamlKey("synchronization.mode")
+    private DataSyncer.Mode syncMode = DataSyncer.Mode.DELAY;
 
+    @YamlComment("The number of data snapshot backups that should be kept at once per user")
+    @YamlKey("synchronization.max_user_data_snapshots")
+    private int maxUserDataSnapshots = 16;
+
+    @YamlComment("Number of hours between new snapshots being saved as backups (Use \"0\" to backup all snapshots)")
+    @YamlKey("synchronization.snapshot_backup_frequency")
+    private int snapshotBackupFrequency = 4;
+
+    @YamlComment("List of save cause IDs for which a snapshot will be automatically pinned (so it won't be rotated)."
+            + " Docs: https://william278.net/docs/husksync/data-rotation#save-causes")
+    @YamlKey("synchronization.auto_pinned_save_causes")
+    private List<String> autoPinnedSaveCauses = List.of(
+            DataSnapshot.SaveCause.INVENTORY_COMMAND.name(),
+            DataSnapshot.SaveCause.ENDERCHEST_COMMAND.name(),
+            DataSnapshot.SaveCause.BACKUP_RESTORE.name(),
+            DataSnapshot.SaveCause.LEGACY_MIGRATION.name(),
+            DataSnapshot.SaveCause.MPDB_MIGRATION.name()
+    );
+
+    @YamlComment("Whether to create a snapshot for users on a world when the server saves that world")
     @YamlKey("synchronization.save_on_world_save")
     private boolean saveOnWorldSave = true;
 
-    @YamlKey("synchronization.save_on_death")
+    @YamlComment("Whether to create a snapshot for users when they die (containing their death drops)")
+    @YamlKey("synchronization.save_on_death.enabled")
     private boolean saveOnDeath = false;
 
-    @YamlKey("synchronization.save_empty_drops_on_death")
-    private boolean saveEmptyDropsOnDeath = true;
+    @YamlComment("What items to save in death snapshots? (DROPS or ITEMS_TO_KEEP). "
+            + " Note that ITEMS_TO_KEEP (suggested for keepInventory servers) requires a Paper 1.19.4+ server.")
+    @YamlKey("synchronization.save_on_death.items_to_save")
+    private DeathItemsMode deathItemsMode = DeathItemsMode.DROPS;
 
+    @YamlComment("Should a death snapshot still be created even if the items to save on the player's death are empty?")
+    @YamlKey("synchronization.save_on_death.save_empty_items")
+    private boolean saveEmptyDeathItems = true;
+
+    @YamlComment("Whether dead players who log out and log in to a different server should have their items saved.")
+    @YamlKey("synchronization.save_on_death.sync_dead_players_changing_server")
+    private boolean synchronizeDeadPlayersChangingServer = true;
+
+    @YamlComment("Whether to use the snappy data compression algorithm. Keep on unless you know what you're doing")
     @YamlKey("synchronization.compress_data")
     private boolean compressData = true;
 
+    @YamlComment("Where to display sync notifications (ACTION_BAR, CHAT, TOAST or NONE)")
     @YamlKey("synchronization.notification_display_slot")
-    private NotificationDisplaySlot notificationDisplaySlot = NotificationDisplaySlot.ACTION_BAR;
+    private Locales.NotificationSlot notificationSlot = Locales.NotificationSlot.ACTION_BAR;
 
-    @YamlKey("synchronization.synchronise_dead_players_changing_server")
-    private boolean synchroniseDeadPlayersChangingServer = true;
+    @YamlComment("(Experimental) Persist Cartography Table locked maps to let them be viewed on any server")
+    @YamlKey("synchronization.persist_locked_maps")
+    private boolean persistLockedMaps = true;
 
+    @YamlComment("Whether to synchronize player max health (requires health syncing to be enabled)")
+    @YamlKey("synchronization.synchronize_max_health")
+    private boolean synchronizeMaxHealth = true;
+
+    @YamlComment("If using the DELAY sync method, how long should this server listen for Redis key data updates before "
+            + "pulling data from the database instead (i.e., if the user did not change servers).")
     @YamlKey("synchronization.network_latency_milliseconds")
     private int networkLatencyMilliseconds = 500;
 
+    @YamlComment("Which data types to synchronize (Docs: https://william278.net/docs/husksync/sync-features)")
     @YamlKey("synchronization.features")
-    private Map<String, Boolean> synchronizationFeatures = SynchronizationFeature.getDefaults();
+    private Map<String, Boolean> synchronizationFeatures = Identifier.getConfigMap();
 
+    @YamlComment("Commands which should be blocked before a player has finished syncing (Use * to block all commands)")
     @YamlKey("synchronization.blacklisted_commands_while_locked")
     private List<String> blacklistedCommandsWhileLocked = new ArrayList<>(List.of("*"));
 
+    @YamlComment("Event priorities for listeners (HIGHEST, NORMAL, LOWEST). Change if you encounter plugin conflicts")
     @YamlKey("synchronization.event_priorities")
-    private Map<String, String> synchronizationEventPriorities = EventType.getDefaults();
+    private Map<String, String> syncEventPriorities = EventListener.ListenerType.getDefaults();
 
 
     // Zero-args constructor for instantiation via Annotaml
+    @SuppressWarnings("unused")
     public Settings() {
     }
 
@@ -159,6 +237,19 @@ public class Settings {
 
     public boolean doDebugLogging() {
         return debugLogging;
+    }
+
+    public boolean doBrigadierTabCompletion() {
+        return brigadierTabCompletion;
+    }
+
+    public boolean usePlanHook() {
+        return enablePlanHook;
+    }
+
+    @NotNull
+    public Database.Type getDatabaseType() {
+        return databaseType;
     }
 
     @NotNull
@@ -229,12 +320,21 @@ public class Settings {
         return redisPassword;
     }
 
-    public boolean isRedisUseSsl() {
+    public boolean redisUseSsl() {
         return redisUseSsl;
+    }
+
+    @NotNull
+    public DataSyncer.Mode getSyncMode() {
+        return syncMode;
     }
 
     public int getMaxUserDataSnapshots() {
         return maxUserDataSnapshots;
+    }
+
+    public int getBackupFrequency() {
+        return snapshotBackupFrequency;
     }
 
     public boolean doSaveOnWorldSave() {
@@ -245,21 +345,38 @@ public class Settings {
         return saveOnDeath;
     }
 
-    public boolean doSaveEmptyDropsOnDeath() {
-        return saveEmptyDropsOnDeath;
+    @NotNull
+    public DeathItemsMode getDeathItemsMode() {
+        return deathItemsMode;
+    }
+
+    public boolean doSaveEmptyDeathItems() {
+        return saveEmptyDeathItems;
     }
 
     public boolean doCompressData() {
         return compressData;
     }
 
-    @NotNull
-    public NotificationDisplaySlot getNotificationDisplaySlot() {
-        return notificationDisplaySlot;
+    public boolean doAutoPin(@NotNull DataSnapshot.SaveCause cause) {
+        return autoPinnedSaveCauses.contains(cause.name());
     }
 
-    public boolean isSynchroniseDeadPlayersChangingServer() {
-        return synchroniseDeadPlayersChangingServer;
+    @NotNull
+    public Locales.NotificationSlot getNotificationDisplaySlot() {
+        return notificationSlot;
+    }
+
+    public boolean doPersistLockedMaps() {
+        return persistLockedMaps;
+    }
+
+    public boolean doSynchronizeDeadPlayersChangingServer() {
+        return synchronizeDeadPlayersChangingServer;
+    }
+
+    public boolean doSynchronizeMaxHealth() {
+        return synchronizeMaxHealth;
     }
 
     public int getNetworkLatencyMilliseconds() {
@@ -271,8 +388,8 @@ public class Settings {
         return synchronizationFeatures;
     }
 
-    public boolean getSynchronizationFeature(@NotNull SynchronizationFeature feature) {
-        return getSynchronizationFeatures().getOrDefault(feature.name().toLowerCase(Locale.ENGLISH), feature.enabledByDefault);
+    public boolean isSyncFeatureEnabled(@NotNull Identifier id) {
+        return id.isCustom() || getSynchronizationFeatures().getOrDefault(id.getKeyValue(), id.isEnabledByDefault());
     }
 
     @NotNull
@@ -281,13 +398,20 @@ public class Settings {
     }
 
     @NotNull
-    public EventPriority getEventPriority(@NotNull Settings.EventType eventType) {
+    public EventListener.Priority getEventPriority(@NotNull EventListener.ListenerType type) {
         try {
-            return EventPriority.valueOf(synchronizationEventPriorities.get(eventType.name().toLowerCase(Locale.ENGLISH)));
+            return EventListener.Priority.valueOf(syncEventPriorities.get(type.name().toLowerCase(Locale.ENGLISH)));
         } catch (IllegalArgumentException e) {
-            e.printStackTrace();
-            return EventPriority.NORMAL;
+            return EventListener.Priority.NORMAL;
         }
+    }
+
+    /**
+     * Represents the mode of saving items on death
+     */
+    public enum DeathItemsMode {
+        DROPS,
+        ITEMS_TO_KEEP
     }
 
     /**
@@ -315,113 +439,6 @@ public class Settings {
                     .map(TableName::toEntry)
                     .toArray(Map.Entry[]::new));
         }
-    }
-
-    /**
-     * Determines the slot a system notification should be displayed in
-     */
-    public enum NotificationDisplaySlot {
-        /**
-         * Displays the notification in the action bar
-         */
-        ACTION_BAR,
-        /**
-         * Displays the notification in the chat
-         */
-        CHAT,
-        /**
-         * Displays the notification in an advancement toast
-         */
-        TOAST,
-        /**
-         * Does not display the notification
-         */
-        NONE
-    }
-
-    /**
-     * Represents enabled synchronisation features
-     */
-    public enum SynchronizationFeature {
-        INVENTORIES(true),
-        ENDER_CHESTS(true),
-        HEALTH(true),
-        MAX_HEALTH(true),
-        HUNGER(true),
-        EXPERIENCE(true),
-        POTION_EFFECTS(true),
-        ADVANCEMENTS(true),
-        GAME_MODE(true),
-        STATISTICS(true),
-        PERSISTENT_DATA_CONTAINER(false),
-        LOCKED_MAPS(false),
-        LOCATION(false);
-
-        private final boolean enabledByDefault;
-
-        SynchronizationFeature(boolean enabledByDefault) {
-            this.enabledByDefault = enabledByDefault;
-        }
-
-        @NotNull
-        private Map.Entry<String, Boolean> toEntry() {
-            return Map.entry(name().toLowerCase(Locale.ENGLISH), enabledByDefault);
-        }
-
-        @SuppressWarnings("unchecked")
-        @NotNull
-        private static Map<String, Boolean> getDefaults() {
-            return Map.ofEntries(Arrays.stream(values())
-                    .map(SynchronizationFeature::toEntry)
-                    .toArray(Map.Entry[]::new));
-        }
-    }
-
-    /**
-     * Represents events that HuskSync listens to, with a configurable priority listener
-     */
-    public enum EventType {
-        JOIN_LISTENER(EventPriority.LOWEST),
-        QUIT_LISTENER(EventPriority.LOWEST),
-        DEATH_LISTENER(EventPriority.NORMAL);
-
-        private final EventPriority defaultPriority;
-
-        EventType(@NotNull EventPriority defaultPriority) {
-            this.defaultPriority = defaultPriority;
-        }
-
-        @NotNull
-        private Map.Entry<String, String> toEntry() {
-            return Map.entry(name().toLowerCase(Locale.ENGLISH), defaultPriority.name());
-        }
-
-
-        @SuppressWarnings("unchecked")
-        @NotNull
-        private static Map<String, String> getDefaults() {
-            return Map.ofEntries(Arrays.stream(values())
-                    .map(EventType::toEntry)
-                    .toArray(Map.Entry[]::new));
-        }
-    }
-
-    /**
-     * Represents priorities for events that HuskSync listens to
-     */
-    public enum EventPriority {
-        /**
-         * Listens and processes the event execution last
-         */
-        HIGHEST,
-        /**
-         * Listens in between {@link #HIGHEST} and {@link #LOWEST} priority marked
-         */
-        NORMAL,
-        /**
-         * Listens and processes the event execution first
-         */
-        LOWEST
     }
 
 }
