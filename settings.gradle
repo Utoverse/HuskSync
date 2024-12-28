@@ -1,6 +1,7 @@
 pluginManagement {
     repositories {
         gradlePluginPortal()
+        maven { url 'https://maven.fabricmc.net/' }
     }
 }
 
@@ -9,5 +10,5 @@ include(
         'common',
         'bukkit',
         'paper',
-        'plugin'
+        'fabric'
 )

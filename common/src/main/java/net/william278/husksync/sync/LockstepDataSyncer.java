@@ -21,6 +21,7 @@ package net.william278.husksync.sync;
 
 import net.william278.husksync.HuskSync;
 import net.william278.husksync.data.DataSnapshot;
+import net.william278.husksync.redis.RedisKeyType;
 import net.william278.husksync.user.OnlineUser;
 import org.jetbrains.annotations.NotNull;
 
@@ -32,38 +33,39 @@ public class LockstepDataSyncer extends DataSyncer {
 
     @Override
     public void initialize() {
-        plugin.getRedisManager().clearUsersCheckedOutOnServer();
+        getRedis().clearUsersCheckedOutOnServer();
     }
 
     @Override
     public void terminate() {
-        plugin.getRedisManager().clearUsersCheckedOutOnServer();
+        getRedis().clearUsersCheckedOutOnServer();
     }
 
     // Consume their data when they are checked in
     @Override
-    public void setUserData(@NotNull OnlineUser user) {
+    public void syncApplyUserData(@NotNull OnlineUser user) {
         this.listenForRedisData(user, () -> {
-            if (plugin.getRedisManager().getUserCheckedOut(user).isEmpty()) {
-                plugin.getRedisManager().setUserCheckedOut(user, true);
-                plugin.getRedisManager().getUserData(user).ifPresentOrElse(
-                        data -> user.applySnapshot(data, DataSnapshot.UpdateCause.SYNCHRONIZED),
-                        () -> this.setUserFromDatabase(user)
-                );
-                return true;
+            if (getRedis().getUserCheckedOut(user).isPresent()) {
+                return false;
             }
-            return false;
+            getRedis().setUserCheckedOut(user, true);
+            getRedis().getUserData(user).ifPresentOrElse(
+                    data -> user.applySnapshot(data, DataSnapshot.UpdateCause.SYNCHRONIZED),
+                    () -> this.setUserFromDatabase(user)
+            );
+            return true;
         });
     }
 
     @Override
-    public void saveUserData(@NotNull OnlineUser user) {
-        plugin.runAsync(() -> {
-            final DataSnapshot.Packed data = user.createSnapshot(DataSnapshot.SaveCause.DISCONNECT);
-            plugin.getRedisManager().setUserData(user, data);
-            plugin.getRedisManager().setUserCheckedOut(user, false);
-            plugin.getDatabase().addSnapshot(user, data);
-        });
+    public void syncSaveUserData(@NotNull OnlineUser onlineUser) {
+        plugin.runAsync(() -> saveData(
+                onlineUser, onlineUser.createSnapshot(DataSnapshot.SaveCause.DISCONNECT),
+                (user, data) -> {
+                    getRedis().setUserData(user, data, RedisKeyType.TTL_1_YEAR);
+                    getRedis().setUserCheckedOut(user, false);
+                }
+        ));
     }
 
 }

@@ -19,6 +19,7 @@
 
 package net.william278.husksync.database;
 
+import com.google.common.collect.Lists;
 import com.zaxxer.hikari.HikariDataSource;
 import net.william278.husksync.HuskSync;
 import net.william278.husksync.adapter.DataAdapter;
@@ -34,6 +35,8 @@ import java.time.OffsetDateTime;
 import java.util.*;
 import java.util.logging.Level;
 
+import static net.william278.husksync.config.Settings.DatabaseSettings;
+
 public class MySqlDatabase extends Database {
 
     private static final String DATA_POOL_NAME = "HuskSyncHikariPool";
@@ -43,9 +46,10 @@ public class MySqlDatabase extends Database {
 
     public MySqlDatabase(@NotNull HuskSync plugin) {
         super(plugin);
-        this.flavor = plugin.getSettings().getDatabaseType().getProtocol();
-        this.driverClass = plugin.getSettings().getDatabaseType() == Type.MARIADB
-                ? "org.mariadb.jdbc.Driver" : "com.mysql.cj.jdbc.Driver";
+
+        final Type type = plugin.getSettings().getDatabase().getType();
+        this.flavor = type.getProtocol();
+        this.driverClass = type == Type.MARIADB ? "org.mariadb.jdbc.Driver" : "com.mysql.cj.jdbc.Driver";
     }
 
     /**
@@ -67,26 +71,28 @@ public class MySqlDatabase extends Database {
     @Override
     public void initialize() throws IllegalStateException {
         // Initialize the Hikari pooled connection
+        final DatabaseSettings.DatabaseCredentials credentials = plugin.getSettings().getDatabase().getCredentials();
         dataSource = new HikariDataSource();
         dataSource.setDriverClassName(driverClass);
         dataSource.setJdbcUrl(String.format("jdbc:%s://%s:%s/%s%s",
                 flavor,
-                plugin.getSettings().getMySqlHost(),
-                plugin.getSettings().getMySqlPort(),
-                plugin.getSettings().getMySqlDatabase(),
-                plugin.getSettings().getMySqlConnectionParameters()
+                credentials.getHost(),
+                credentials.getPort(),
+                credentials.getDatabase(),
+                credentials.getParameters()
         ));
 
         // Authenticate with the database
-        dataSource.setUsername(plugin.getSettings().getMySqlUsername());
-        dataSource.setPassword(plugin.getSettings().getMySqlPassword());
+        dataSource.setUsername(credentials.getUsername());
+        dataSource.setPassword(credentials.getPassword());
 
         // Set connection pool options
-        dataSource.setMaximumPoolSize(plugin.getSettings().getMySqlConnectionPoolSize());
-        dataSource.setMinimumIdle(plugin.getSettings().getMySqlConnectionPoolIdle());
-        dataSource.setMaxLifetime(plugin.getSettings().getMySqlConnectionPoolLifetime());
-        dataSource.setKeepaliveTime(plugin.getSettings().getMySqlConnectionPoolKeepAlive());
-        dataSource.setConnectionTimeout(plugin.getSettings().getMySqlConnectionPoolTimeout());
+        final DatabaseSettings.PoolSettings pool = plugin.getSettings().getDatabase().getConnectionPool();
+        dataSource.setMaximumPoolSize(pool.getMaximumPoolSize());
+        dataSource.setMinimumIdle(pool.getMinimumIdle());
+        dataSource.setMaxLifetime(pool.getMaximumLifetime());
+        dataSource.setKeepaliveTime(pool.getKeepaliveTime());
+        dataSource.setConnectionTimeout(pool.getConnectionTimeout());
         dataSource.setPoolName(DATA_POOL_NAME);
 
         // Set additional connection pool properties
@@ -109,6 +115,9 @@ public class MySqlDatabase extends Database {
         );
         dataSource.setDataSourceProperties(properties);
 
+        // Check config for if tables should be created
+        if (!plugin.getSettings().getDatabase().isCreateTables()) return;
+
         // Prepare database schema; make tables if they don't exist
         try (Connection connection = dataSource.getConnection()) {
             final String[] databaseSchema = getSchemaStatements(String.format("database/%s_schema.sql", flavor));
@@ -118,11 +127,11 @@ public class MySqlDatabase extends Database {
                 }
             } catch (SQLException e) {
                 throw new IllegalStateException("Failed to create database tables. Please ensure you are running MySQL v8.0+ " +
-                        "and that your connecting user account has privileges to create tables.", e);
+                                                "and that your connecting user account has privileges to create tables.", e);
             }
         } catch (SQLException | IOException e) {
             throw new IllegalStateException("Failed to establish a connection to the MySQL database. " +
-                    "Please check the supplied database credentials in the config file", e);
+                                            "Please check the supplied database credentials in the config file", e);
         }
     }
 
@@ -212,6 +221,27 @@ public class MySqlDatabase extends Database {
         return Optional.empty();
     }
 
+    @Override
+    @NotNull
+    public List<User> getAllUsers() {
+        final List<User> users = Lists.newArrayList();
+        try (Connection connection = getConnection()) {
+            try (PreparedStatement statement = connection.prepareStatement(formatStatementTables("""
+                    SELECT `uuid`, `username`
+                    FROM `%users_table%`;
+                    """))) {
+                final ResultSet resultSet = statement.executeQuery();
+                while (resultSet.next()) {
+                    users.add(new User(UUID.fromString(resultSet.getString("uuid")),
+                            resultSet.getString("username")));
+                }
+            }
+        } catch (SQLException e) {
+            plugin.log(Level.SEVERE, "Failed to fetch a user by name from the database", e);
+        }
+        return users;
+    }
+
     @Blocking
     @Override
     public Optional<DataSnapshot.Packed> getLatestSnapshot(@NotNull User user) {
@@ -245,7 +275,7 @@ public class MySqlDatabase extends Database {
     @Override
     @NotNull
     public List<DataSnapshot.Packed> getAllSnapshots(@NotNull User user) {
-        final List<DataSnapshot.Packed> retrievedData = new ArrayList<>();
+        final List<DataSnapshot.Packed> retrievedData = Lists.newArrayList();
         try (Connection connection = getConnection()) {
             try (PreparedStatement statement = connection.prepareStatement(formatStatementTables("""
                     SELECT `version_uuid`, `timestamp`,  `data`
@@ -306,7 +336,8 @@ public class MySqlDatabase extends Database {
     protected void rotateSnapshots(@NotNull User user) {
         final List<DataSnapshot.Packed> unpinnedUserData = getAllSnapshots(user).stream()
                 .filter(dataSnapshot -> !dataSnapshot.isPinned()).toList();
-        if (unpinnedUserData.size() > plugin.getSettings().getMaxUserDataSnapshots()) {
+        final int maxSnapshots = plugin.getSettings().getSynchronization().getMaxUserDataSnapshots();
+        if (unpinnedUserData.size() > maxSnapshots) {
             try (Connection connection = getConnection()) {
                 try (PreparedStatement statement = connection.prepareStatement(formatStatementTables("""
                         DELETE FROM `%user_data_table%`
@@ -314,7 +345,7 @@ public class MySqlDatabase extends Database {
                         AND `pinned` IS FALSE
                         ORDER BY `timestamp` ASC
                         LIMIT %entry_count%;""".replace("%entry_count%",
-                        Integer.toString(unpinnedUserData.size() - plugin.getSettings().getMaxUserDataSnapshots()))))) {
+                        Integer.toString(unpinnedUserData.size() - maxSnapshots))))) {
                     statement.setString(1, user.getUuid().toString());
                     statement.executeUpdate();
                 }

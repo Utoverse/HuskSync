@@ -20,7 +20,6 @@
 package net.william278.husksync.user;
 
 import de.themoep.minedown.adventure.MineDown;
-import de.themoep.minedown.adventure.MineDownParser;
 import net.kyori.adventure.audience.Audience;
 import net.kyori.adventure.text.Component;
 import net.william278.husksync.HuskSync;
@@ -50,13 +49,11 @@ public abstract class OnlineUser extends User implements CommandUser, UserDataHo
      */
     public abstract boolean isOffline();
 
-    /**
-     * Get the player's adventure {@link Audience}
-     *
-     * @return the player's {@link Audience}
-     */
     @NotNull
-    public abstract Audience getAudience();
+    @Override
+    public Audience getAudience() {
+        return getPlugin().getAudience(getUuid());
+    }
 
     /**
      * Send a message to this player
@@ -73,9 +70,7 @@ public abstract class OnlineUser extends User implements CommandUser, UserDataHo
      * @param mineDown the parsed {@link MineDown} to send
      */
     public void sendMessage(@NotNull MineDown mineDown) {
-        sendMessage(mineDown
-                .disable(MineDownParser.Option.SIMPLE_FORMATTING)
-                .replace().toComponent());
+        sendMessage(mineDown.toComponent());
     }
 
     /**
@@ -84,9 +79,7 @@ public abstract class OnlineUser extends User implements CommandUser, UserDataHo
      * @param mineDown the parsed {@link MineDown} to send
      */
     public void sendActionBar(@NotNull MineDown mineDown) {
-        getAudience().sendActionBar(mineDown
-                .disable(MineDownParser.Option.SIMPLE_FORMATTING)
-                .replace().toComponent());
+        getAudience().sendActionBar(mineDown.toComponent());
     }
 
     /**
@@ -96,7 +89,9 @@ public abstract class OnlineUser extends User implements CommandUser, UserDataHo
      * @param description    the description of the toast
      * @param iconMaterial   the namespace-keyed material to use as an hasIcon of the toast
      * @param backgroundType the background ("ToastType") of the toast
+     * @deprecated No longer supported
      */
+    @Deprecated(since = "3.6.7")
     public abstract void sendToast(@NotNull MineDown title, @NotNull MineDown description,
                                    @NotNull String iconMaterial, @NotNull String backgroundType);
 
@@ -131,6 +126,9 @@ public abstract class OnlineUser extends User implements CommandUser, UserDataHo
     public void applySnapshot(@NotNull DataSnapshot.Packed snapshot, @NotNull DataSnapshot.UpdateCause cause) {
         getPlugin().fireEvent(getPlugin().getPreSyncEvent(this, snapshot), (event) -> {
             if (!isOffline()) {
+                getPlugin().debug(String.format("Applying snapshot (%s) to %s (cause: %s)",
+                        snapshot.getShortId(), getUsername(), cause.getDisplayName()
+                ));
                 UserDataHolder.super.applySnapshot(
                         event.getData(), (succeeded) -> completeSync(succeeded, cause, getPlugin())
                 );
@@ -146,15 +144,9 @@ public abstract class OnlineUser extends User implements CommandUser, UserDataHo
      */
     public void completeSync(boolean succeeded, @NotNull DataSnapshot.UpdateCause cause, @NotNull HuskSync plugin) {
         if (succeeded) {
-            switch (plugin.getSettings().getNotificationDisplaySlot()) {
+            switch (plugin.getSettings().getSynchronization().getNotificationDisplaySlot()) {
                 case CHAT -> cause.getCompletedLocale(plugin).ifPresent(this::sendMessage);
                 case ACTION_BAR -> cause.getCompletedLocale(plugin).ifPresent(this::sendActionBar);
-                case TOAST -> cause.getCompletedLocale(plugin)
-                        .ifPresent(locale -> this.sendToast(
-                                locale, new MineDown(""),
-                                "minecraft:bell",
-                                "TASK"
-                        ));
             }
             plugin.fireEvent(
                     plugin.getSyncCompleteEvent(this),
