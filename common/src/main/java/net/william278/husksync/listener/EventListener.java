@@ -25,9 +25,7 @@ import net.william278.husksync.data.DataSnapshot;
 import net.william278.husksync.user.OnlineUser;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 import static net.william278.husksync.config.Settings.SynchronizationSettings.SaveOnDeathSettings;
 
@@ -49,6 +47,7 @@ public abstract class EventListener {
      * @param user The {@link OnlineUser} to handle
      */
     protected final void handlePlayerJoin(@NotNull OnlineUser user) {
+        plugin.getDisconnectingPlayers().remove(user.getUuid());
         if (user.isNpc()) {
             return;
         }
@@ -62,11 +61,20 @@ public abstract class EventListener {
      * @param user The {@link OnlineUser} to handle
      */
     protected final void handlePlayerQuit(@NotNull OnlineUser user) {
-        if (user.isNpc() || plugin.isDisabling() || plugin.isLocked(user.getUuid())) {
+        // Check the user is a user, the plugin isn't disabling, then mark as disconnecting
+        if (user.isNpc() || plugin.isDisabling()) {
             return;
         }
-        plugin.lockPlayer(user.getUuid());
-        plugin.getDataSyncer().syncSaveUserData(user);
+        plugin.getDisconnectingPlayers().add(user.getUuid());
+
+        // Lock, then save their data if the user is unlocked
+        if (!plugin.isLocked(user.getUuid())) {
+            plugin.lockPlayer(user.getUuid());
+            plugin.getDataSyncer().syncSaveUserData(user);
+        } else {
+            plugin.debug(String.format("[%s] disconnected while locked - data will NOT be saved!",
+                    user.getName()));
+        }
     }
 
     /**
@@ -79,9 +87,9 @@ public abstract class EventListener {
             return;
         }
         usersInWorld.stream()
-                .filter(user -> !plugin.isLocked(user.getUuid()) && !user.isNpc())
-                .forEach(user -> plugin.getDataSyncer().saveData(
-                        user, user.createSnapshot(DataSnapshot.SaveCause.WORLD_SAVE)
+                .filter(user -> !user.isNpc() && !user.hasDisconnected() && !plugin.isLocked(user.getUuid()))
+                .forEach(user -> plugin.getDataSyncer().saveCurrentUserData(
+                        user, DataSnapshot.SaveCause.WORLD_SAVE
                 ));
     }
 
@@ -94,12 +102,13 @@ public abstract class EventListener {
     protected void saveOnPlayerDeath(@NotNull OnlineUser user, @NotNull Data.Items items) {
         final SaveOnDeathSettings settings = plugin.getSettings().getSynchronization().getSaveOnDeath();
         if (plugin.isDisabling() || !settings.isEnabled() || plugin.isLocked(user.getUuid())
-            || user.isNpc() || (!settings.isSaveEmptyItems() && items.isEmpty())) {
+                || user.isNpc() || (!settings.isSaveEmptyItems() && items.isEmpty())) {
             return;
         }
 
+        // We don't persist this to Redis for syncing, as this snapshot is from a state they won't be in post-respawn
         final DataSnapshot.Packed snapshot = user.createSnapshot(DataSnapshot.SaveCause.DEATH);
-        snapshot.edit(plugin, (data -> data.getInventory().ifPresent(inventory -> inventory.setContents(items))));
+        snapshot.edit(plugin, (data -> data.getInventory().ifPresent(inv -> inv.setContents(items))));
         plugin.getDataSyncer().saveData(user, snapshot);
     }
 
@@ -108,19 +117,27 @@ public abstract class EventListener {
      * Handle the plugin disabling
      */
     public void handlePluginDisable() {
-        // Save for all online players
+        // Save for all online players that haven't been processed by PlayerQuitEvent yet.
         plugin.getOnlineUsers().stream()
                 .filter(user -> !plugin.isLocked(user.getUuid()) && !user.isNpc())
                 .forEach(user -> {
                     plugin.lockPlayer(user.getUuid());
-                    plugin.getDataSyncer().saveData(
-                            user,
-                            user.createSnapshot(DataSnapshot.SaveCause.SERVER_SHUTDOWN),
-                            (saved, data) -> plugin.getRedisManager().clearUserData(saved)
-                    );
+                    plugin.getDataSyncer().saveCurrentUserData(user, DataSnapshot.SaveCause.SERVER_SHUTDOWN);
                 });
 
-        // Close outstanding connections
+        // Wait for the in-progress async saves queued during shutdown:
+        // - PlayerQuitEvent saves (Paper kicks players before calling onDisable())
+        // - The onDisable() saves (queued above)
+        // - WorldSaveEvent saves still in queue
+        // These saves run asynchronously and must complete before closing DB/Redis connections
+        plugin.getDataSyncer().awaitPendingSaves();
+    }
+
+    /**
+     * Close database and Redis connections. Must run AFTER {@link #handlePluginDisable()}
+     * and AFTER {@code dataSyncer.terminate()}, since the latter clears checkout keys via Redis.
+     */
+    public void closeConnections() {
         plugin.getDatabase().terminate();
         plugin.getRedisManager().terminate();
     }

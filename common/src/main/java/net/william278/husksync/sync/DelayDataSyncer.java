@@ -21,7 +21,6 @@ package net.william278.husksync.sync;
 
 import net.william278.husksync.HuskSync;
 import net.william278.husksync.data.DataSnapshot;
-import net.william278.husksync.redis.RedisKeyType;
 import net.william278.husksync.user.OnlineUser;
 import org.jetbrains.annotations.NotNull;
 
@@ -48,7 +47,7 @@ public class DelayDataSyncer extends DataSyncer {
                     this.listenForRedisData(
                             user,
                             () -> getRedis().getUserData(user).map(data -> {
-                                user.applySnapshot(data, DataSnapshot.UpdateCause.SYNCHRONIZED);
+                                this.applyLatestSnapshot(user, data);
                                 return true;
                             }).orElse(false)
                     );
@@ -59,11 +58,18 @@ public class DelayDataSyncer extends DataSyncer {
 
     @Override
     public void syncSaveUserData(@NotNull OnlineUser onlineUser) {
-        plugin.runAsync(() -> {
+        runTrackedAsync(onlineUser, () -> {
             getRedis().setUserServerSwitch(onlineUser);
             saveData(
                     onlineUser, onlineUser.createSnapshot(DataSnapshot.SaveCause.DISCONNECT),
-                    (user, data) -> getRedis().setUserData(user, data, RedisKeyType.TTL_10_SECONDS)
+                    (user, data) -> {
+                        if (!getRedis().setUserData(user, data)) {
+                            // Cached Redis snapshot may be stale, so clear the LATEST_SNAPSHOT key
+                            // Next login uses a database snapshot, see applyLatestSnapshot()
+                            getRedis().clearUserData(user);
+                        }
+                        plugin.unlockPlayer(user.getUuid());
+                    }
             );
         });
     }

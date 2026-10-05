@@ -27,6 +27,7 @@ import org.jetbrains.annotations.NotNull;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.logging.Level;
+import java.util.stream.Collectors;
 
 /**
  * A holder of data in the form of {@link Data}s, which can be synced
@@ -46,7 +47,11 @@ public interface UserDataHolder extends DataHolder {
                 .filter(Identifier::isEnabled)
                 .map(id -> Map.entry(id, getData(id)))
                 .filter(data -> data.getValue().isPresent())
-                .collect(HashMap::new, (map, data) -> map.put(data.getKey(), data.getValue().get()), HashMap::putAll);
+                .collect(Collectors.toMap(
+                        Map.Entry::getKey,
+                        entry -> entry.getValue().get(),
+                        (a, b) -> a, HashMap::new
+                ));
     }
 
     /**
@@ -76,6 +81,15 @@ public interface UserDataHolder extends DataHolder {
     }
 
     /**
+     * Returns whether data can be applied to the holder at this time
+     *
+     * @return {@code true} if data can be applied, otherwise false
+     */
+    default boolean cannotApplySnapshot() {
+        return false;
+    }
+
+    /**
      * Deserialize and apply a data snapshot to this data owner
      * <p>
      * This method will deserialize the data on the current thread, then synchronously apply it on
@@ -90,9 +104,12 @@ public interface UserDataHolder extends DataHolder {
      * @since 3.0
      */
     default void applySnapshot(@NotNull DataSnapshot.Packed snapshot, @NotNull ThrowingConsumer<Boolean> runAfter) {
-        final HuskSync plugin = getPlugin();
+        if (cannotApplySnapshot()) {
+            return;
+        }
 
         // Unpack the snapshot
+        final HuskSync plugin = getPlugin();
         final DataSnapshot.Unpacked unpacked;
         try {
             unpacked = snapshot.unpack(plugin);
@@ -104,8 +121,12 @@ public interface UserDataHolder extends DataHolder {
 
         // Synchronously attempt to apply the snapshot
         plugin.runSync(() -> {
+            if (cannotApplySnapshot()) {
+                return;
+            }
+
             try {
-                for (Map.Entry<Identifier, Data> entry : unpacked.getData().entrySet()) {
+                for (Map.Entry<Identifier, Data> entry : unpacked.getSortedIterable()) {
                     final Identifier identifier = entry.getKey();
                     if (!identifier.isEnabled()) {
                         continue;

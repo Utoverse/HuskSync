@@ -34,29 +34,31 @@ public interface FabricUserDataHolder extends UserDataHolder {
 
     @Override
     default Optional<? extends Data> getData(@NotNull Identifier id) {
-        if (!id.isCustom()) {
-            try {
-                return switch (id.getKeyValue()) {
-                    case "inventory" -> getInventory();
-                    case "ender_chest" -> getEnderChest();
-                    case "potion_effects" -> getPotionEffects();
-                    case "advancements" -> getAdvancements();
-                    case "location" -> getLocation();
-                    case "statistics" -> getStatistics();
-                    case "health" -> getHealth();
-                    case "hunger" -> getHunger();
-                    case "attributes" -> getAttributes();
-                    case "experience" -> getExperience();
-                    case "game_mode" -> getGameMode();
-                    case "flight_status" -> getFlightStatus();
-                    case "persistent_data" -> getPersistentData();
-                    default -> throw new IllegalStateException(String.format("Unexpected data type: %s", id));
-                };
-            } catch (Throwable e) {
-                getPlugin().debug("Failed to get data for key: " + id.getKeyValue(), e);
-            }
+        if (id.isCustom()) {
+            return Optional.ofNullable(getCustomDataStore().get(id));
         }
-        return Optional.ofNullable(getCustomDataStore().get(id));
+
+        try {
+            return switch (id.getKeyValue()) {
+                case "inventory" -> getInventory();
+                case "ender_chest" -> getEnderChest();
+                case "potion_effects" -> getPotionEffects();
+                case "advancements" -> getAdvancements();
+                case "location" -> getLocation();
+                case "statistics" -> getStatistics();
+                case "health" -> getHealth();
+                case "hunger" -> getHunger();
+                case "attributes" -> getAttributes();
+                case "experience" -> getExperience();
+                case "game_mode" -> getGameMode();
+                case "flight_status" -> getFlightStatus();
+                case "persistent_data" -> getPersistentData();
+                default -> throw new IllegalStateException(String.format("Unexpected data type: %s", id));
+            };
+        } catch (Throwable e) {
+            getPlugin().debug("Failed to get data for key: " + id.asMinimalString(), e);
+            return Optional.empty();
+        }
     }
 
     @Override
@@ -77,27 +79,41 @@ public interface FabricUserDataHolder extends UserDataHolder {
         final PlayerInventory inventory = getPlayer().getInventory();
         return Optional.of(FabricData.Items.Inventory.from(
                 getCombinedInventory(inventory),
-                inventory.selectedSlot
+                //#if MC<12105
+                //$$ inventory.selectedSlot
+                //#else
+                inventory.getSelectedSlot()
+                //#endif
         ));
     }
 
     // Gets the player's combined inventory; their inventory, plus offhand and armor.
     @Nullable
     private ItemStack @NotNull [] getCombinedInventory(@NotNull PlayerInventory inv) {
-        final ItemStack[] combined = new ItemStack[inv.main.size() + inv.armor.size() + inv.offHand.size()];
-        System.arraycopy(
-                inv.main.toArray(new ItemStack[0]), 0, combined,
-                0, inv.main.size()
-        );
-        System.arraycopy(
-                inv.armor.toArray(new ItemStack[0]), 0, combined,
-                inv.main.size(), inv.armor.size()
-        );
-        System.arraycopy(
-                inv.offHand.toArray(new ItemStack[0]), 0, combined,
-                inv.main.size() + inv.armor.size(), inv.offHand.size()
-        );
+        //#if MC<12105
+        //$$ final ItemStack[] combined = new ItemStack[inv.main.size() + inv.armor.size() + inv.offHand.size()];
+        //$$ System.arraycopy(
+        //$$         inv.main.toArray(new ItemStack[0]), 0, combined,
+        //$$         0, inv.main.size()
+        //$$ );
+        //$$ System.arraycopy(
+        //$$         inv.armor.toArray(new ItemStack[0]), 0, combined,
+        //$$         inv.main.size(), inv.armor.size()
+        //$$ );
+        //$$ System.arraycopy(
+        //$$         inv.offHand.toArray(new ItemStack[0]), 0, combined,
+        //$$         inv.main.size() + inv.armor.size(), inv.offHand.size()
+        //$$ );
+        //$$ return combined;
+        //#else
+        final ItemStack[] combined = new ItemStack[inv.size()];
+        int slot = 0;
+        for (ItemStack itemStack : inv) {
+            combined[slot] = itemStack;
+            slot++;
+        }
         return combined;
+        //#endif
     }
 
     @NotNull

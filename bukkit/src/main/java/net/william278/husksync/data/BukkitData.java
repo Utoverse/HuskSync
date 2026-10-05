@@ -48,7 +48,11 @@ import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.Range;
 import org.jetbrains.annotations.Unmodifiable;
 
+import java.lang.reflect.Method;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.logging.Level;
 import java.util.stream.Collectors;
 
@@ -194,7 +198,9 @@ public abstract class BukkitData implements Data {
 
             @Override
             public void apply(@NotNull BukkitUser user, @NotNull BukkitHuskSync plugin) throws IllegalStateException {
-                user.getPlayer().getEnderChest().setContents(plugin.setMapViews(getContents()));
+                ItemStack[] fullContents = plugin.setMapViews(getContents());
+                ItemStack[] enderChestContents = Arrays.copyOf(fullContents, Math.min(fullContents.length, user.getPlayer().getEnderChest().getSize()));
+                user.getPlayer().getEnderChest().setContents(enderChestContents);
             }
 
         }
@@ -362,7 +368,7 @@ public abstract class BukkitData implements Data {
 
                 // Set player experience and level (prevent advancement awards applying twice), reset game rule
                 if (!toAward.isEmpty()
-                    && (player.getLevel() != expLevel || player.getExp() != expProgress)) {
+                        && (player.getLevel() != expLevel || player.getExp() != expProgress)) {
                     player.setLevel(expLevel);
                     player.setExp(expProgress);
                 }
@@ -436,6 +442,28 @@ public abstract class BukkitData implements Data {
     @NoArgsConstructor(access = AccessLevel.PRIVATE)
     public static class Statistics extends BukkitData implements Data.Statistics, Adaptable {
 
+        // Pre-filtered material lists to avoid N×M iteration over the full Registry.MATERIAL per statistic type
+        private static Set<Material> BLOCK_MATERIALS;
+        private static Set<Material> ITEM_MATERIALS;
+
+        private static Set<Material> getBlockMaterials() {
+            if (BLOCK_MATERIALS == null) {
+                final Set<Material> blocks = new HashSet<>();
+                Registry.MATERIAL.forEach(mat -> { if (mat.isBlock()) blocks.add(mat); });
+                BLOCK_MATERIALS = Collections.unmodifiableSet(blocks);
+            }
+            return BLOCK_MATERIALS;
+        }
+
+        private static Set<Material> getItemMaterials() {
+            if (ITEM_MATERIALS == null) {
+                final Set<Material> items = new HashSet<>();
+                Registry.MATERIAL.forEach(mat -> { if (mat.isItem()) items.add(mat); });
+                ITEM_MATERIALS = Collections.unmodifiableSet(items);
+            }
+            return ITEM_MATERIALS;
+        }
+
         @SerializedName("generic")
         private Map<String, Integer> genericStatistics;
         @SerializedName("blocks")
@@ -454,8 +482,8 @@ public abstract class BukkitData implements Data {
                 switch (id.getType()) {
                     case UNTYPED -> addStatistic(player, id, generic);
                     // Todo - Future - Use BLOCK and ITEM registries when API stabilizes
-                    case BLOCK -> addStatistic(player, id, Registry.MATERIAL, blocks);
-                    case ITEM -> addStatistic(player, id, Registry.MATERIAL, items);
+                    case BLOCK -> addStatistic(player, id, getBlockMaterials(), blocks);
+                    case ITEM -> addStatistic(player, id, getItemMaterials(), items);
                     case ENTITY -> addStatistic(player, id, Registry.ENTITY_TYPE, entities);
                 }
             });
@@ -478,12 +506,17 @@ public abstract class BukkitData implements Data {
         }
 
         private static <R extends Keyed> void addStatistic(@NotNull Player p, @NotNull Statistic id,
-                                                           @NotNull Registry<R> registry,
+                                                           @NotNull Iterable<R> registry,
                                                            @NotNull Map<String, Map<String, Integer>> map) {
             registry.forEach(i -> {
                 try {
-                    final int stat = i instanceof Material m ? p.getStatistic(id, m) :
-                            (i instanceof EntityType e ? p.getStatistic(id, e) : -1);
+                    int stat = 0;
+                    if (i instanceof Material mat && ((id.getType() == Statistic.Type.BLOCK && mat.isBlock())
+                            || (id.getType() == Statistic.Type.ITEM && mat.isItem()))) {
+                        stat = p.getStatistic(id, mat);
+                    } else if (i instanceof EntityType ent && id.getType() == Statistic.Type.ENTITY) {
+                        stat = p.getStatistic(id, ent);
+                    }
                     if (stat != 0) {
                         map.compute(id.getKey().getKey(), (k, v) -> v == null ? Maps.newHashMap() : v)
                                 .put(i.getKey().getKey(), stat);
@@ -512,8 +545,18 @@ public abstract class BukkitData implements Data {
             try {
                 switch (type) {
                     case UNTYPED -> player.setStatistic(stat, value);
-                    case BLOCK, ITEM -> player.setStatistic(stat, Objects.requireNonNull(matchMaterial(key[0])), value);
-                    case ENTITY -> player.setStatistic(stat, Objects.requireNonNull(matchEntityType(key[0])), value);
+                    case BLOCK, ITEM -> {
+                        Material material = matchMaterial(key.length > 0 ? key[0] : null);
+                        if (material != null) {
+                            player.setStatistic(stat, material, value);
+                        }
+                    }
+                    case ENTITY -> {
+                        EntityType entity = matchEntityType(key.length > 0 ? key[0] : null);
+                        if (entity != null) {
+                            player.setStatistic(stat, entity, value);
+                        }
+                    }
                 }
             } catch (Throwable a) {
                 plugin.log(Level.WARNING, "Failed to apply statistic " + id, a);
@@ -554,10 +597,62 @@ public abstract class BukkitData implements Data {
     @SuppressWarnings("UnstableApiUsage")
     public static class Attributes extends BukkitData implements Data.Attributes, Adaptable {
 
+        // Folia's entity scheduler (and Paper's Folia-compatible equivalent) never run tasks inline, even
+        // from the thread that already owns the entity. Recursing into it while blocked on its own future
+        // would therefore hang forever and trip the server watchdog. Cached as it's checked on every call.
+        @Nullable
+        private static final Method IS_OWNED_BY_CURRENT_REGION = findIsOwnedByCurrentRegionMethod();
+
         private List<Attribute> attributes;
+
+        @Nullable
+        private static Method findIsOwnedByCurrentRegionMethod() {
+            try {
+                return Server.class.getMethod("isOwnedByCurrentRegion", org.bukkit.entity.Entity.class);
+            } catch (NoSuchMethodException e) {
+                return null;
+            }
+        }
+
+        // Whether the calling thread already owns and is permitted to tick the player
+        // Runs on main thread on Spigot/Paper, or the owning region's thread on Folia
+        private static boolean isUserOnCallingThread(@NotNull Player player) {
+            if (IS_OWNED_BY_CURRENT_REGION == null) {
+                return Bukkit.isPrimaryThread();
+            }
+            try {
+                return (boolean) IS_OWNED_BY_CURRENT_REGION.invoke(Bukkit.getServer(), player);
+            } catch (ReflectiveOperationException e) {
+                return Bukkit.isPrimaryThread();
+            }
+        }
 
         @NotNull
         public static BukkitData.Attributes adapt(@NotNull Player player, @NotNull HuskSync plugin) {
+            if (isUserOnCallingThread(player)) {
+                return collectAttributes(player, plugin);
+            }
+
+            final CompletableFuture<BukkitData.Attributes> future = new CompletableFuture<>();
+            plugin.runSync(() -> {
+                try {
+                    future.complete(collectAttributes(player, plugin));
+                } catch (Throwable e) {
+                    future.completeExceptionally(e);
+                }
+            }, BukkitUser.adapt(player, plugin)); // Necessary to ensure it is run on the player's scheduler
+
+            try {
+                return future.get(5, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                throw new IllegalStateException("Timed out adapting attributes for " + player.getName(), e);
+            } catch (Exception e) {
+                throw new IllegalStateException("Failed to adapt attributes for " + player.getName(), e);
+            }
+        }
+
+        @NotNull
+        private static BukkitData.Attributes collectAttributes(@NotNull Player player, @NotNull HuskSync plugin) {
             final List<Attribute> attributes = Lists.newArrayList();
             final AttributeSettings settings = plugin.getSettings().getSynchronization().getAttributes();
             Registry.ATTRIBUTE.forEach(id -> {
@@ -590,7 +685,6 @@ public abstract class BukkitData implements Data {
                     instance.getBaseValue(),
                     instance.getModifiers().stream()
                             .filter(modifier -> !settings.isIgnoredModifier(modifier.getName()))
-                            .filter(modifier -> modifier.getSlotGroup() != EquipmentSlotGroup.ANY)
                             .map(BukkitData.Attributes::adapt).collect(Collectors.toSet())
             );
         }
@@ -615,7 +709,7 @@ public abstract class BukkitData implements Data {
                 attribute.modifiers().stream()
                         .filter(mod -> instance.getModifiers().stream().map(AttributeModifier::getName)
                                 .noneMatch(n -> n.equals(mod.name())))
-                        .distinct().filter(mod -> !mod.hasUuid())
+                        .distinct()
                         .forEach(mod -> instance.addModifier(adapt(mod)));
             }
         }
@@ -630,8 +724,7 @@ public abstract class BukkitData implements Data {
             );
         }
 
-        @Override
-        public void apply(@NotNull BukkitUser user, @NotNull BukkitHuskSync plugin) throws IllegalStateException {
+        private void applyAttributes(@NotNull BukkitUser user, @NotNull HuskSync plugin) {
             final AttributeSettings settings = plugin.getSettings().getSynchronization().getAttributes();
             Registry.ATTRIBUTE.forEach(id -> {
                 if (settings.isIgnoredAttribute(id.getKey().toString())) {
@@ -639,6 +732,34 @@ public abstract class BukkitData implements Data {
                 }
                 applyAttribute(user.getPlayer().getAttribute(id), getAttribute(id).orElse(null));
             });
+        }
+
+        @Override
+        public void apply(@NotNull BukkitUser user, @NotNull BukkitHuskSync plugin) throws IllegalStateException {
+            // The apply loop calling this already runs on the player's owning thread - scheduling again
+            // here would be the exact hang described above.
+            if (isUserOnCallingThread(user.getPlayer())) {
+                applyAttributes(user, plugin);
+                return;
+            }
+
+            final CompletableFuture<Void> future = new CompletableFuture<>();
+            plugin.runSync(() -> {
+                try {
+                    applyAttributes(user, plugin);
+                    future.complete(null);
+                } catch (Throwable e) {
+                    future.completeExceptionally(e);
+                }
+            }, user);
+
+            try {
+                future.get(5, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                throw new IllegalStateException("Timed out applying attributes for " + user.getPlayer().getName(), e);
+            } catch (Exception e) {
+                throw new IllegalStateException("Failed to apply attributes for " + user.getPlayer().getName(), e);
+            }
         }
 
     }
@@ -690,6 +811,14 @@ public abstract class BukkitData implements Data {
         @Override
         @SuppressWarnings("deprecation")
         public void apply(@NotNull BukkitUser user, @NotNull BukkitHuskSync plugin) throws IllegalStateException {
+            if (!Bukkit.isPrimaryThread()) {
+                try {
+                    Bukkit.getScheduler().callSyncMethod(plugin, () -> { this.apply(user, plugin); return null; }).get();
+                    return;
+                } catch (Exception e) {
+                    throw new IllegalStateException("Failed to apply health on main thread", e);
+                }
+            }
             final Player player = user.getPlayer();
 
             // Set health
@@ -774,6 +903,10 @@ public abstract class BukkitData implements Data {
             final Player player = user.getPlayer();
             player.setTotalExperience(totalExperience);
             player.setLevel(expLevel);
+            if (expProgress < 0f || expProgress > 1f) {
+                plugin.log(Level.WARNING, "Invalid experience progress value: " + expProgress + ". Must be between 0 and 1.");
+                return;
+            }
             player.setExp(expProgress);
         }
 

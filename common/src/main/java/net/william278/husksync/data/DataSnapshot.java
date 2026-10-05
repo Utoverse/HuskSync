@@ -22,7 +22,7 @@ package net.william278.husksync.data;
 import com.google.common.collect.Maps;
 import com.google.gson.annotations.Expose;
 import com.google.gson.annotations.SerializedName;
-import de.themoep.minedown.adventure.MineDown;
+import net.kyori.adventure.text.Component;
 import lombok.AccessLevel;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -40,6 +40,7 @@ import org.jetbrains.annotations.Nullable;
 import java.time.OffsetDateTime;
 import java.util.*;
 import java.util.function.Consumer;
+import java.util.logging.Level;
 import java.util.stream.Collectors;
 
 /**
@@ -370,7 +371,7 @@ public class DataSnapshot {
     public static class Unpacked extends DataSnapshot implements DataHolder {
 
         @Expose(serialize = false, deserialize = false)
-        private final TreeMap<Identifier, Data> deserialized;
+        private final Map<Identifier, Data> deserialized;
 
         private Unpacked(@NotNull UUID id, boolean pinned, @NotNull OffsetDateTime timestamp,
                          @NotNull String saveCause, @NotNull String serverName, @NotNull Map<String, String> data,
@@ -381,7 +382,7 @@ public class DataSnapshot {
         }
 
         private Unpacked(@NotNull UUID id, boolean pinned, @NotNull OffsetDateTime timestamp,
-                         @NotNull String saveCause, @NotNull String serverName, @NotNull TreeMap<Identifier, Data> data,
+                         @NotNull String saveCause, @NotNull String serverName, @NotNull Map<Identifier, Data> data,
                          @NotNull Version minecraftVersion, @NotNull String platformType, int formatVersion) {
             super(id, pinned, timestamp, saveCause, serverName, Map.of(), minecraftVersion, platformType, formatVersion);
             this.deserialized = data;
@@ -389,15 +390,24 @@ public class DataSnapshot {
 
         @NotNull
         @ApiStatus.Internal
-        private TreeMap<Identifier, Data> deserializeData(@NotNull HuskSync plugin) {
-            return data.entrySet().stream()
+        private Map<Identifier, Data> deserializeData(@NotNull HuskSync plugin) {
+            final Map<Identifier, Data> result = new HashMap<>();
+            data.entrySet().stream()
                     .filter(e -> plugin.getIdentifier(e.getKey()).isPresent())
                     .map(entry -> Map.entry(plugin.getIdentifier(entry.getKey()).orElseThrow(), entry.getValue()))
-                    .collect(Collectors.toMap(
-                            Map.Entry::getKey,
-                            entry -> plugin.deserializeData(entry.getKey(), entry.getValue(), getMinecraftVersion()),
-                            (a, b) -> b, () -> Maps.newTreeMap(SerializerRegistry.DEPENDENCY_ORDER_COMPARATOR)
-                    ));
+                    .forEach(entry -> {
+                        try {
+                            result.put(entry.getKey(), plugin.deserializeData(
+                                    entry.getKey(), entry.getValue(), getMinecraftVersion()));
+                        } catch (Throwable e) {
+                            plugin.log(Level.WARNING,
+                                    "Failed to deserialize %s data for snapshot %s; skipping it. "
+                                            + "The data may contain invalid values (e.g. items with -Infinity NBT attributes). "
+                                            + "The player will load without this data type for this session."
+                                            .formatted(entry.getKey(), getId()), e);
+                        }
+                    });
+            return result;
         }
 
         @NotNull
@@ -406,7 +416,9 @@ public class DataSnapshot {
             return deserialized.entrySet().stream()
                     .collect(Collectors.toMap(
                             entry -> entry.getKey().toString(),
-                            entry -> plugin.serializeData(entry.getKey(), entry.getValue())
+                            entry -> plugin.serializeData(entry.getKey(), entry.getValue()),
+                            (a, b) -> a,
+                            HashMap::new
                     ));
         }
 
@@ -419,6 +431,20 @@ public class DataSnapshot {
         @NotNull
         public Map<Identifier, Data> getData() {
             return deserialized;
+        }
+
+        /**
+         * Get a sorted iterable of the snapshots the snapshot is holding
+         *
+         * @return The data map
+         * @since 3.8.2
+         */
+        @NotNull
+        @ApiStatus.Internal
+        public Iterable<Map.Entry<Identifier, Data>> getSortedIterable() {
+            final TreeMap<Identifier, Data> tree = Maps.newTreeMap(SerializerRegistry.DEPENDENCY_ORDER_COMPARATOR);
+            tree.putAll(deserialized);
+            return tree.entrySet();
         }
 
         /**
@@ -453,12 +479,12 @@ public class DataSnapshot {
         private String serverName;
         private boolean pinned;
         private OffsetDateTime timestamp;
-        private final TreeMap<Identifier, Data> data;
+        private final Map<Identifier, Data> data;
 
         private Builder(@NotNull HuskSync plugin) {
             this.plugin = plugin;
             this.pinned = false;
-            this.data = Maps.newTreeMap(SerializerRegistry.DEPENDENCY_ORDER_COMPARATOR);
+            this.data = Maps.newHashMap();
             this.timestamp = OffsetDateTime.now();
             this.id = UUID.randomUUID();
             this.serverName = plugin.getServerName();
@@ -535,9 +561,9 @@ public class DataSnapshot {
         public Builder timestamp(@NotNull OffsetDateTime timestamp) {
             if (timestamp.isAfter(OffsetDateTime.now())) {
                 throw new IllegalArgumentException("Data snapshots cannot have a timestamp set in the future! "
-                                                   + "Make sure your database server time matches the server time.\n"
-                                                   + "Current game server timestamp: " + OffsetDateTime.now() + " / "
-                                                   + "Snapshot timestamp: " + timestamp);
+                        + "Make sure your database server time matches the server time.\n"
+                        + "Current game server timestamp: " + OffsetDateTime.now() + " / "
+                        + "Snapshot timestamp: " + timestamp);
             }
             this.timestamp = timestamp;
             return this;
@@ -881,6 +907,20 @@ public class DataSnapshot {
         public static final SaveCause BACKUP_RESTORE = of("BACKUP_RESTORE");
 
         /**
+         * Indicates data was saved from executing the {@code /userdata save} command
+         *
+         * @since 3.8
+         */
+        public static final SaveCause SAVE_COMMAND = of("SAVE_COMMAND", true);
+
+        /**
+         * Indicates data was saved from executing the {@code /userdata dump} command
+         *
+         * @since 3.8
+         */
+        public static final SaveCause DUMP_COMMAND = of("DUMP_COMMAND", true);
+
+        /**
          * Indicates data was saved by an API call
          *
          * @since 2.0
@@ -923,7 +963,7 @@ public class DataSnapshot {
          */
         @NotNull
         public static SaveCause of(@NotNull String name) {
-            return of(name,true);
+            return of(name, true);
         }
 
         /**
@@ -957,6 +997,19 @@ public class DataSnapshot {
         public static SaveCause[] values() {
             if (registry == null) registry = new HashMap<>();
             return registry.values().toArray(new SaveCause[0]);
+        }
+
+        /**
+         * Get the name of this save cause, for logging or string-formatting.
+         * <p>
+         * Without this override it falls back to a default {@link Object#toString()} representation.
+         *
+         * @return the cause name
+         */
+        @NotNull
+        @Override
+        public String toString() {
+            return name();
         }
     }
 
@@ -1046,7 +1099,7 @@ public class DataSnapshot {
          * @param plugin plugin instance
          * @return the message
          */
-        public Optional<MineDown> getCompletedLocale(@NotNull HuskSync plugin) {
+        public Optional<Component> getCompletedLocale(@NotNull HuskSync plugin) {
             if (completedLocale() != null) {
                 return Optional.of(plugin.getLocales().getLocale(completedLocale())
                         .orElse(plugin.getLocales().format(getDisplayName())));
@@ -1060,7 +1113,7 @@ public class DataSnapshot {
          * @param plugin plugin instance
          * @return the message
          */
-        public Optional<MineDown> getFailedLocale(@NotNull HuskSync plugin) {
+        public Optional<Component> getFailedLocale(@NotNull HuskSync plugin) {
             if (failureLocale() != null) {
                 return Optional.of(plugin.getLocales().getLocale(failureLocale())
                         .orElse(plugin.getLocales().format(failureLocale())));
@@ -1073,6 +1126,19 @@ public class DataSnapshot {
             return new UpdateCause[]{
                     SYNCHRONIZED, NEW_USER, UPDATED
             };
+        }
+
+        /**
+         * Get the name of this update cause, for logging or string-formatting.
+         * <p>
+         * Without this override it falls back to the default {@link Object#toString()} representation.
+         *
+         * @return the cause name
+         */
+        @NotNull
+        @Override
+        public String toString() {
+            return name();
         }
     }
 }

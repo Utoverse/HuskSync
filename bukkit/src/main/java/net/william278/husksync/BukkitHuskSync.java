@@ -23,7 +23,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.google.gson.Gson;
-import de.tr7zw.changeme.nbtapi.utils.DataFixerUtil;
+import de.tr7zw.changeme.nbtapi.NBT;
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -47,6 +47,8 @@ import net.william278.husksync.database.PostgresDatabase;
 import net.william278.husksync.event.BukkitEventDispatcher;
 import net.william278.husksync.hook.PlanHook;
 import net.william278.husksync.listener.BukkitEventListener;
+import net.william278.husksync.listener.LockedHandler;
+import net.william278.husksync.maps.BukkitMapHandler;
 import net.william278.husksync.migrator.LegacyMigrator;
 import net.william278.husksync.migrator.Migrator;
 import net.william278.husksync.migrator.MpdbMigrator;
@@ -55,9 +57,10 @@ import net.william278.husksync.sync.DataSyncer;
 import net.william278.husksync.user.BukkitUser;
 import net.william278.husksync.user.OnlineUser;
 import net.william278.husksync.util.BukkitLegacyConverter;
-import net.william278.husksync.util.BukkitMapPersister;
 import net.william278.husksync.util.BukkitTask;
 import net.william278.husksync.util.LegacyConverter;
+import net.william278.toilet.BukkitToilet;
+import net.william278.toilet.Toilet;
 import net.william278.uniform.Uniform;
 import net.william278.uniform.bukkit.BukkitUniform;
 import org.bstats.bukkit.Metrics;
@@ -81,7 +84,7 @@ import java.util.stream.Collectors;
 @NoArgsConstructor
 @SuppressWarnings("unchecked")
 public class BukkitHuskSync extends JavaPlugin implements HuskSync, BukkitTask.Supplier,
-        BukkitEventDispatcher, BukkitMapPersister {
+        BukkitEventDispatcher, BukkitMapHandler {
 
     /**
      * Metrics ID for <a href="https://bstats.org/plugin/bukkit/HuskSync%20-%20Bukkit/13140">HuskSync on Bukkit</a>.
@@ -89,17 +92,17 @@ public class BukkitHuskSync extends JavaPlugin implements HuskSync, BukkitTask.S
     private static final int METRICS_ID = 13140;
     private static final String PLATFORM_TYPE_ID = "bukkit";
 
-    private final TreeMap<Identifier, Serializer<? extends Data>> serializers = Maps.newTreeMap(
-            SerializerRegistry.DEPENDENCY_ORDER_COMPARATOR
-    );
+    private final HashMap<Identifier, Serializer<? extends Data>> serializers = Maps.newHashMap();
     private final Map<UUID, Map<Identifier, Data>> playerCustomDataStore = Maps.newConcurrentMap();
     private final Map<Integer, MapView> mapViews = Maps.newConcurrentMap();
     private final List<Migrator> availableMigrators = Lists.newArrayList();
     private final Set<UUID> lockedPlayers = Sets.newConcurrentHashSet();
+    private final Set<UUID> disconnectingPlayers = Sets.newConcurrentHashSet();
 
     private boolean disabling;
     private Gson gson;
     private AudienceProvider audiences;
+    private Toilet toilet;
     private MorePaperLib paperLib;
     private Database database;
     private RedisManager redisManager;
@@ -139,9 +142,15 @@ public class BukkitHuskSync extends JavaPlugin implements HuskSync, BukkitTask.S
     @Override
     public void onEnable() {
         this.audiences = BukkitAudiences.create(this);
+        this.toilet = BukkitToilet.create(getDumpOptions());
 
         // Check compatibility
         checkCompatibility();
+
+        // Preload NBT-API
+        if (!NBT.preloadApi()) {
+            log(Level.WARNING, "Failed to load NBT API (unrecognized server version). NBT features may not work correctly!");
+        }
 
         // Register commands
         initialize("commands", (plugin) -> getUniform().register(PluginCommand.Type.create(this)));
@@ -227,12 +236,19 @@ public class BukkitHuskSync extends JavaPlugin implements HuskSync, BukkitTask.S
         // Handle shutdown
         this.disabling = true;
 
-        // Close the event listener / data syncer
+        // Complete player saves, including any other pending async saves
+        if (this.eventListener != null) {
+            this.eventListener.handlePluginDisable();
+        }
+
+        // Clear Redis checkout state after snapshots are correctly persisted
         if (this.dataSyncer != null) {
             this.dataSyncer.terminate();
         }
+
+        // Close DB/Redis connections after checkout state is cleared
         if (this.eventListener != null) {
-            this.eventListener.handlePluginDisable();
+            this.eventListener.closeConnections();
         }
 
         // Unregister API and cancel tasks
@@ -251,7 +267,7 @@ public class BukkitHuskSync extends JavaPlugin implements HuskSync, BukkitTask.S
     @Override
     @NotNull
     public Set<OnlineUser> getOnlineUsers() {
-        return getServer().getOnlinePlayers().stream()
+        return new ArrayList<>(getServer().getOnlinePlayers()).stream()
                 .map(player -> BukkitUser.adapt(player, this))
                 .collect(Collectors.toSet());
     }
@@ -333,22 +349,6 @@ public class BukkitHuskSync extends JavaPlugin implements HuskSync, BukkitTask.S
         return Version.fromString(getServer().getBukkitVersion());
     }
 
-    public int getDataVersion(@NotNull Version mcVersion) {
-        return switch (mcVersion.toStringWithoutMetadata()) {
-            case "1.16", "1.16.1", "1.16.2", "1.16.3", "1.16.4", "1.16.5" -> DataFixerUtil.VERSION1_16_5;
-            case "1.17", "1.17.1" -> DataFixerUtil.VERSION1_17_1;
-            case "1.18", "1.18.1", "1.18.2" -> DataFixerUtil.VERSION1_18_2;
-            case "1.19", "1.19.1", "1.19.2" -> DataFixerUtil.VERSION1_19_2;
-            case "1.20", "1.20.1", "1.20.2" -> DataFixerUtil.VERSION1_20_2;
-            case "1.20.3", "1.20.4" -> DataFixerUtil.VERSION1_20_4;
-            case "1.20.5", "1.20.6" -> DataFixerUtil.VERSION1_20_5;
-            case "1.21", "1.21.1" -> DataFixerUtil.VERSION1_21;
-            case "1.21.2", "1.21.3" -> DataFixerUtil.VERSION1_21_2;
-            case "1.21.4" -> 4189/*DataFixerUtil.VERSION1_21_4*/;
-            default -> DataFixerUtil.getCurrentVersion();
-        };
-    }
-
     @NotNull
     @Override
     public String getPlatformType() {
@@ -364,6 +364,12 @@ public class BukkitHuskSync extends JavaPlugin implements HuskSync, BukkitTask.S
     @Override
     public Optional<LegacyConverter> getLegacyConverter() {
         return Optional.of(legacyConverter);
+    }
+
+    @Override
+    @NotNull
+    public LockedHandler getLockedHandler() {
+        return eventListener.getLockedHandler();
     }
 
     @NotNull

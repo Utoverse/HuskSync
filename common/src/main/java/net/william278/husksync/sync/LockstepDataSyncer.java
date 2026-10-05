@@ -21,9 +21,10 @@ package net.william278.husksync.sync;
 
 import net.william278.husksync.HuskSync;
 import net.william278.husksync.data.DataSnapshot;
-import net.william278.husksync.redis.RedisKeyType;
 import net.william278.husksync.user.OnlineUser;
 import org.jetbrains.annotations.NotNull;
+
+import java.util.Optional;
 
 public class LockstepDataSyncer extends DataSyncer {
 
@@ -45,25 +46,46 @@ public class LockstepDataSyncer extends DataSyncer {
     @Override
     public void syncApplyUserData(@NotNull OnlineUser user) {
         this.listenForRedisData(user, () -> {
-            if (getRedis().getUserCheckedOut(user).isPresent()) {
+            if (user.cannotApplySnapshot()) {
+                plugin.debug("Not checking data state for user who has gone offline: %s".formatted(user.getName()));
                 return false;
             }
+
+            // If they are checked out, ask the server to check them back in and return false
+            final Optional<String> server = getRedis().getUserCheckedOut(user);
+            if (server.isPresent() && !server.get().equals(plugin.getServerName())) {
+                if (plugin.getSettings().getSynchronization().isCheckinPetitions()) {
+                    getRedis().petitionServerCheckin(server.get(), user);
+                }
+                return false;
+            }
+
+            // If they are checked in - or checked out on *this* server - we can apply their latest data
             getRedis().setUserCheckedOut(user, true);
-            getRedis().getUserData(user).ifPresentOrElse(
-                    data -> user.applySnapshot(data, DataSnapshot.UpdateCause.SYNCHRONIZED),
-                    () -> this.setUserFromDatabase(user)
-            );
+            final Optional<DataSnapshot.Packed> redisData = getRedis().getUserData(user);
+            if (redisData.isPresent()) {
+                plugin.debug(String.format("[%s] Applying data from Redis cache", user.getName()));
+                this.applyLatestSnapshot(user, redisData.get());
+            } else {
+                plugin.debug(String.format("[%s] no Redis data; loading from database", user.getName()));
+                this.setUserFromDatabase(user);
+            }
             return true;
         });
     }
 
     @Override
     public void syncSaveUserData(@NotNull OnlineUser onlineUser) {
-        plugin.runAsync(() -> saveData(
+        runTrackedAsync(onlineUser, () -> saveData(
                 onlineUser, onlineUser.createSnapshot(DataSnapshot.SaveCause.DISCONNECT),
                 (user, data) -> {
-                    getRedis().setUserData(user, data, RedisKeyType.TTL_1_YEAR);
+                    if (!getRedis().setUserData(user, data)) {
+                        // Cached Redis snapshot may be stale, so clear the LATEST_SNAPSHOT key
+                        // Next login uses a database snapshot, see applyLatestSnapshot()
+                        getRedis().clearUserData(user);
+                    }
                     getRedis().setUserCheckedOut(user, false);
+                    plugin.unlockPlayer(user.getUuid());
                 }
         ));
     }

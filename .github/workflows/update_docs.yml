@@ -5,9 +5,6 @@ on:
     branches: [ 'master' ]
     paths:
       - 'docs/**'
-      - 'workflows/**'
-    tags-ignore:
-      - '*'
 
 permissions:
   contents: write
@@ -18,8 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 'Checkout for CI 🛎️'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: 'Push Docs to Github Wiki 📄️'
-        uses: Andrew-Chen-Wang/github-wiki-action@v4
+        uses: Andrew-Chen-Wang/github-wiki-action@v5
         with:
           path: 'docs'

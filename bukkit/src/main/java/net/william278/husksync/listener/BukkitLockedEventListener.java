@@ -21,6 +21,7 @@ package net.william278.husksync.listener;
 
 import lombok.Getter;
 import net.william278.husksync.BukkitHuskSync;
+import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Projectile;
 import org.bukkit.event.Cancellable;
@@ -40,7 +41,6 @@ import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.Objects;
 import java.util.UUID;
 
 @Getter
@@ -61,6 +61,10 @@ public class BukkitLockedEventListener implements LockedHandler, Listener {
     public void onProjectileLaunch(@NotNull ProjectileLaunchEvent event) {
         final Projectile projectile = event.getEntity();
         if (projectile.getShooter() instanceof Player player) {
+            if (event.getEntity().getType() == EntityType.ENDER_PEARL && plugin.getSettings().getSynchronization().isAllowPearlSpawningWhileLocked()) {
+                // Allow ender pearls to spawn while locked (stasis chambers fix post 1.21.1)
+                return;
+            }
             cancelPlayerEvent(player.getUniqueId(), event);
         }
     }
@@ -124,7 +128,6 @@ public class BukkitLockedEventListener implements LockedHandler, Listener {
     private void cancelPlayerEvent(@NotNull UUID uuid, @NotNull Cancellable event) {
         if (cancelPlayerEvent(uuid)) {
             event.setCancelled(true);
-            plugin.debug("Cancelled event " + event.getClass().getSimpleName() + " from " + Objects.requireNonNull(plugin.getServer().getPlayer(uuid)).getName());
         }
     }
 

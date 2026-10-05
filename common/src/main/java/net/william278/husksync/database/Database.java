@@ -24,8 +24,10 @@ import net.william278.husksync.HuskSync;
 import net.william278.husksync.config.Settings;
 import net.william278.husksync.data.DataSnapshot;
 import net.william278.husksync.user.User;
+import org.intellij.lang.annotations.Language;
 import org.jetbrains.annotations.Blocking;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -56,8 +58,8 @@ public abstract class Database {
     @SuppressWarnings("SameParameterValue")
     @NotNull
     protected final String[] getSchemaStatements(@NotNull String schemaFileName) throws IOException {
-        return formatStatementTables(new String(Objects.requireNonNull(plugin.getResource(schemaFileName))
-                .readAllBytes(), StandardCharsets.UTF_8)).split(";");
+        return Arrays.stream(formatStatementTables(new String(Objects.requireNonNull(plugin.getResource(schemaFileName))
+                .readAllBytes(), StandardCharsets.UTF_8)).split(";")).filter(s -> !s.isBlank()).toArray(String[]::new);
     }
 
     /**
@@ -67,10 +69,12 @@ public abstract class Database {
      * @return the formatted statement, with table placeholders replaced with the correct names
      */
     @NotNull
-    protected final String formatStatementTables(@NotNull String sql) {
+    protected final String formatStatementTables(@NotNull @Language("SQL") String sql) {
         final Settings.DatabaseSettings settings = plugin.getSettings().getDatabase();
         return sql.replaceAll("%users_table%", settings.getTableName(TableName.USERS))
-                .replaceAll("%user_data_table%", settings.getTableName(TableName.USER_DATA));
+                .replaceAll("%user_data_table%", settings.getTableName(TableName.USER_DATA))
+                .replaceAll("%map_data_table%", settings.getTableName(TableName.MAP_DATA))
+                .replaceAll("%map_ids_table%", settings.getTableName(TableName.MAP_IDS));
     }
 
     /**
@@ -126,6 +130,17 @@ public abstract class Database {
     public abstract Optional<DataSnapshot.Packed> getLatestSnapshot(@NotNull User user);
 
     /**
+     * Get the latest data snapshot for a user whose save cause is one of the given causes.
+     *
+     * @param user       The user to get data for
+     * @param saveCauses The {@link DataSnapshot.SaveCause} names to match
+     * @return an optional containing the {@link DataSnapshot}, if a match exists, or an empty optional if not
+     * @since 4.1.0
+     */
+    @Blocking
+    public abstract Optional<DataSnapshot.Packed> getLatestSnapshot(@NotNull User user, @NotNull Collection<String> saveCauses);
+
+    /**
      * Get all {@link DataSnapshot} entries for a user from the database.
      *
      * @param user The user to get data for
@@ -134,6 +149,15 @@ public abstract class Database {
     @Blocking
     @NotNull
     public abstract List<DataSnapshot.Packed> getAllSnapshots(@NotNull User user);
+
+    /**
+     * Get the number of unpinned {@link DataSnapshot}s a user has
+     *
+     * @param user the user to count snapshots for
+     * @return the number of snapshots this user has saved
+     */
+    @Blocking
+    public abstract int getUnpinnedSnapshotCount(@NotNull User user);
 
     /**
      * Gets a specific {@link DataSnapshot} entry for a user from the database, by its UUID.
@@ -186,6 +210,23 @@ public abstract class Database {
         }
         this.createSnapshot(user, snapshot);
         this.rotateSnapshots(user);
+    }
+
+    /**
+     * Create a snapshot in the database, without rotating out a previous backup or pruning old snapshots first.
+     * <p>
+     * Intended for retrying a write that could not be confirmed after a call to {@link #addSnapshot}: that
+     * method's rotation steps have already run for this snapshot, so simply calling it again on retry would
+     * repeat them and could delete further, unrelated backups without ever confirming a successful write.
+     *
+     * @param user     The user to add data for
+     * @param snapshot The {@link DataSnapshot} to set.
+     * @see #addSnapshot(User, DataSnapshot.Packed)
+     * @since 4.1.0
+     */
+    @Blocking
+    public void addSnapshotWithoutRotation(@NotNull User user, @NotNull DataSnapshot.Packed snapshot) {
+        this.createSnapshot(user, snapshot);
     }
 
     /**
@@ -247,6 +288,58 @@ public abstract class Database {
     }
 
     /**
+     * Write map data to a database
+     *
+     * @param serverName Name of the server the map originates from
+     * @param mapId      Original map ID
+     * @param data       Map data
+     */
+    @Blocking
+    public abstract void saveMapData(@NotNull String serverName, int mapId, byte @NotNull [] data);
+
+    /**
+     * Read map data from a database
+     *
+     * @param serverName Name of the server the map originates from
+     * @param mapId      Original map ID
+     * @return the map data bytes, or null if not found
+     */
+    @Blocking
+    public abstract byte @Nullable [] getMapData(@NotNull String serverName, int mapId);
+
+    /**
+     * Reverse lookup: given a local map binding, find the origin server and map ID.
+     *
+     * @param serverName Name of the local server (to_server_name in the binding)
+     * @param mapId      Local map ID on this server (to_id in the binding)
+     * @return Map.Entry with origin server name (key) and origin map ID (value), or null if not found
+     */
+    @Blocking
+    public abstract @Nullable Map.Entry<String, Integer> getMapBinding(@NotNull String serverName, int mapId);
+
+    /**
+     * Bind map IDs across different servers
+     *
+     * @param fromServerName Name of the server the map originates from
+     * @param fromMapId      Original map ID
+     * @param toServerName   Name of the new server
+     * @param toMapId        New map ID
+     */
+    @Blocking
+    public abstract void setMapBinding(@NotNull String fromServerName, int fromMapId, @NotNull String toServerName, int toMapId);
+
+    /**
+     * Get map ID for the new server
+     *
+     * @param fromServerName Name of the server the map originates from
+     * @param fromMapId      Original map ID
+     * @param toServerName   Name of the new server
+     * @return New map ID or -1 if not found
+     */
+    @Blocking
+    public abstract int getBoundMapId(@NotNull String fromServerName, int fromMapId, @NotNull String toServerName);
+
+    /**
      * Wipes <b>all</b> {@link User} entries from the database.
      * <b>This should only be used when preparing tables for a data migration.</b>
      */
@@ -283,7 +376,9 @@ public abstract class Database {
     @Getter
     public enum TableName {
         USERS("husksync_users"),
-        USER_DATA("husksync_user_data");
+        USER_DATA("husksync_user_data"),
+        MAP_DATA("husksync_map_data"),
+        MAP_IDS("husksync_map_ids");
 
         private final String defaultName;
 

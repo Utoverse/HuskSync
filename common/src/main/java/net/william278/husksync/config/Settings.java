@@ -150,7 +150,7 @@ public class Settings {
         }
     }
 
-    // 𝓡𝓮𝓭𝓲𝓼 settings
+    // Redis settings
     @Comment("Redis settings")
     private RedisSettings redis = new RedisSettings();
 
@@ -159,7 +159,9 @@ public class Settings {
     @NoArgsConstructor(access = AccessLevel.PRIVATE)
     public static class RedisSettings {
 
-        @Comment("Specify the credentials of your Redis server here. Set \"password\" to '' if you don't have one")
+        @Comment({"Specify the credentials of your Redis server here.",
+                "Set \"user\" to '' if you don't have one or would like to use the default user.",
+                "Set \"password\" to '' if you don't have one."})
         private RedisCredentials credentials = new RedisCredentials();
 
         @Getter
@@ -168,8 +170,49 @@ public class Settings {
         public static class RedisCredentials {
             private String host = "localhost";
             private int port = 6379;
+            @Comment("Only change the database if you know what you are doing. The default is 0.")
+            private int database = 0;
+            private String user = "";
             private String password = "";
+
+            @Comment("Use SSL/TLS for encrypted connections.")
             private boolean useSsl = false;
+
+            @Comment("Connection timeout in milliseconds.")
+            private int connectionTimeout = 2000;
+
+            @Comment("Socket (read/write) timeout in milliseconds.")
+            private int socketTimeout = 2000;
+
+            @Comment("Max number of connections in the pool.")
+            private int maxTotalConnections = 50;
+
+            @Comment("Max number of idle connections in the pool.")
+            private int maxIdleConnections = 8;
+
+            @Comment("Min number of idle connections in the pool.")
+            private int minIdleConnections = 2;
+
+            @Comment("Enable health checks when borrowing connections from the pool.")
+            private boolean testOnBorrow = true;
+
+            @Comment("Enable health checks when returning connections to the pool.")
+            private boolean testOnReturn = true;
+
+            @Comment("Enable periodic idle connection health checks.")
+            private boolean testWhileIdle = true;
+
+            @Comment("Min evictable idle time (ms) before a connection is eligible for eviction.")
+            private long minEvictableIdleTimeMillis = 60000;
+
+            @Comment("Time (ms) between eviction runs.")
+            private long timeBetweenEvictionRunsMillis = 30000;
+
+            @Comment("Number of retries for commands when connection fails.")
+            private int maxRetries = 3;
+
+            @Comment("Base backoff time in ms for retries (exponential backoff multiplier).")
+            private int retryBackoffMillis = 200;
         }
 
         @Comment("Options for if you're using Redis sentinel. Don't modify this unless you know what you're doing!")
@@ -259,9 +302,12 @@ public class Settings {
         @Comment("Persist maps locked in a Cartography Table to let them be viewed on any server")
         private boolean persistLockedMaps = true;
 
-        @Comment("If using the DELAY sync method, how long should this server listen for Redis key data updates before "
-                 + "pulling data from the database instead (i.e., if the user did not change servers).")
+        @Comment("How long to wait with the DELAY sync method before checking Redis for data. Not used by the LOCKSTEP sync method.")
         private int networkLatencyMilliseconds = 500;
+
+        @Comment({"How long to wait for player saves to finish during server shutdown before closing the database connections",
+                "Should be set to a value between 5000-50000ms, to not consume the server watchdog timeout (typically 60000ms)."})
+        private int shutdownSaveTimeoutMilliseconds = 5000;
 
         @Comment({"Which data types to synchronize.", "Docs: https://william278.net/docs/husksync/sync-features"})
         @Getter(AccessLevel.NONE)
@@ -269,6 +315,9 @@ public class Settings {
 
         @Comment("Commands which should be blocked before a player has finished syncing (Use * to block all commands)")
         private List<String> blacklistedCommandsWhileLocked = new ArrayList<>(List.of("*"));
+
+        @Comment("Prevent ender pearl launch events from being blocked while the user is being locked (fixes stasis chambers on 1.21.1+)")
+        private boolean allowPearlSpawningWhileLocked = true;
 
         @Comment("Configuration for how to sync attributes")
         private AttributeSettings attributes = new AttributeSettings();
@@ -320,6 +369,9 @@ public class Settings {
         @Comment("Event priorities for listeners (HIGHEST, NORMAL, LOWEST). Change if you encounter plugin conflicts")
         @Getter(AccessLevel.NONE)
         private Map<String, String> eventPriorities = EventListener.ListenerType.getDefaults();
+
+        @Comment("Enable check-in petitions for data syncing (don't change this unless you know what you're doing)")
+        private boolean checkinPetitions = false;
 
         public boolean doAutoPin(@NotNull DataSnapshot.SaveCause cause) {
             return autoPinnedSaveCauses.contains(cause.name());

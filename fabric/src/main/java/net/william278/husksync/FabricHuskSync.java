@@ -31,8 +31,11 @@ import net.fabricmc.api.DedicatedServerModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.loader.api.ModContainer;
-import net.kyori.adventure.platform.AudienceProvider;
+//#if MC>=12104
 import net.kyori.adventure.platform.modcommon.MinecraftServerAudiences;
+//#else
+//$$ import net.kyori.adventure.platform.fabric.FabricServerAudiences;
+//#endif
 import net.minecraft.server.MinecraftServer;
 import net.william278.desertwell.util.Version;
 import net.william278.husksync.adapter.DataAdapter;
@@ -51,8 +54,8 @@ import net.william278.husksync.database.PostgresDatabase;
 import net.william278.husksync.event.FabricEventDispatcher;
 import net.william278.husksync.event.ModLoadedCallback;
 import net.william278.husksync.hook.PlanHook;
-import net.william278.husksync.listener.EventListener;
 import net.william278.husksync.listener.FabricEventListener;
+import net.william278.husksync.listener.LockedHandler;
 import net.william278.husksync.migrator.Migrator;
 import net.william278.husksync.redis.RedisManager;
 import net.william278.husksync.sync.DataSyncer;
@@ -61,6 +64,8 @@ import net.william278.husksync.user.FabricUser;
 import net.william278.husksync.user.OnlineUser;
 import net.william278.husksync.util.FabricTask;
 import net.william278.husksync.util.LegacyConverter;
+import net.william278.toilet.Toilet;
+import net.william278.toilet.fabric.FabricToilet;
 import net.william278.uniform.Uniform;
 import net.william278.uniform.fabric.FabricUniform;
 import org.jetbrains.annotations.NotNull;
@@ -78,32 +83,17 @@ import java.util.logging.Level;
 
 @Getter
 @NoArgsConstructor
-@SuppressWarnings("unchecked")
 public class FabricHuskSync implements DedicatedServerModInitializer, HuskSync, FabricTask.Supplier,
         FabricEventDispatcher {
 
     private static final String PLATFORM_TYPE_ID = "fabric";
 
-    private static final int VERSION1_16_5 = 2586;
-    private static final int VERSION1_17_1 = 2730;
-    private static final int VERSION1_18_2 = 2975;
-    private static final int VERSION1_19_2 = 3120;
-    private static final int VERSION1_19_4 = 3337;
-    private static final int VERSION1_20_1 = 3465;
-    private static final int VERSION1_20_2 = 3578;
-    private static final int VERSION1_20_4 = 3700;
-    private static final int VERSION1_20_5 = 3837;
-    private static final int VERSION1_21_1 = 3955;
-    private static final int VERSION1_21_3 = 4082;
-    private static final int VERSION1_21_4 = 4189; // Current
-
-    private final TreeMap<Identifier, Serializer<? extends Data>> serializers = Maps.newTreeMap(
-            SerializerRegistry.DEPENDENCY_ORDER_COMPARATOR
-    );
+    private final HashMap<Identifier, Serializer<? extends Data>> serializers = Maps.newHashMap();
     private final Map<UUID, Map<Identifier, Data>> playerCustomDataStore = Maps.newConcurrentMap();
     private final Map<String, Boolean> permissions = Maps.newHashMap();
     private final List<Migrator> availableMigrators = Lists.newArrayList();
     private final Set<UUID> lockedPlayers = Sets.newConcurrentHashSet();
+    private final Set<UUID> disconnectingPlayers = Sets.newConcurrentHashSet();
     private final Map<UUID, FabricUser> playerMap = Maps.newConcurrentMap();
 
     private Logger logger;
@@ -111,10 +101,15 @@ public class FabricHuskSync implements DedicatedServerModInitializer, HuskSync, 
     private MinecraftServer minecraftServer;
     private boolean disabling;
     private Gson gson;
-    private AudienceProvider audiences;
+    //#if MC>=12104
+    private MinecraftServerAudiences audiences;
+    //#else
+    //$$ private FabricServerAudiences audiences;
+    //#endif
+    private Toilet toilet;
     private Database database;
     private RedisManager redisManager;
-    private EventListener eventListener;
+    private FabricEventListener eventListener;
     private DataAdapter dataAdapter;
     @Setter
     private DataSyncer dataSyncer;
@@ -156,11 +151,22 @@ public class FabricHuskSync implements DedicatedServerModInitializer, HuskSync, 
     }
 
     private void onEnable() {
-        // Initial plugin setup
+        // Audiences
+        //#if MC>=12104
         this.audiences = MinecraftServerAudiences.of(minecraftServer);
+        //#else
+        //$$ this.audiences = FabricServerAudiences.of(minecraftServer);
+        //#endif
+        this.toilet = FabricToilet.create(getDumpOptions(), minecraftServer);
 
         // Check compatibility
         checkCompatibility();
+        log(Level.WARNING, """
+                **************
+                WARNING:
+                HuskSync for Fabric is still in an alpha state and is
+                not considered production ready.
+                **************""");
 
         // Prepare data adapter
         initialize("data adapter", (plugin) -> {
@@ -233,12 +239,19 @@ public class FabricHuskSync implements DedicatedServerModInitializer, HuskSync, 
         // Handle shutdown
         this.disabling = true;
 
-        // Close the event listener / data syncer
+        // Complete player saves, including any other pending async saves
+        if (this.eventListener != null) {
+            this.eventListener.handlePluginDisable();
+        }
+
+        // Clear Redis checkout state after snapshots are correctly persisted
         if (this.dataSyncer != null) {
             this.dataSyncer.terminate();
         }
+
+        // Close DB/Redis connections after checkout state is cleared
         if (this.eventListener != null) {
-            this.eventListener.handlePluginDisable();
+            this.eventListener.closeConnections();
         }
 
         // Cancel tasks, close audiences
@@ -353,25 +366,6 @@ public class FabricHuskSync implements DedicatedServerModInitializer, HuskSync, 
     }
 
     @NotNull
-    public int getDataVersion(@NotNull Version mcVersion) {
-        return switch (mcVersion.toStringWithoutMetadata()) {
-            case "1.16", "1.16.1", "1.16.2", "1.16.3", "1.16.4", "1.16.5" -> VERSION1_16_5;
-            case "1.17", "1.17.1" -> VERSION1_17_1;
-            case "1.18", "1.18.1", "1.18.2" -> VERSION1_18_2;
-            case "1.19", "1.19.1", "1.19.2" -> VERSION1_19_2;
-            case "1.19.4" -> VERSION1_19_4;
-            case "1.20", "1.20.1" -> VERSION1_20_1;
-            case "1.20.2" -> VERSION1_20_2;
-            case "1.20.4" -> VERSION1_20_4;
-            case "1.20.5", "1.20.6" -> VERSION1_20_5;
-            case "1.21", "1.21.1" -> VERSION1_21_1;
-            case "1.21.2", "1.21.3" -> VERSION1_21_3;
-            case "1.21.4" -> VERSION1_21_4;
-            default -> VERSION1_21_4; // Current supported ver
-        };
-    }
-
-    @NotNull
     @Override
     public String getPlatformType() {
         return PLATFORM_TYPE_ID;
@@ -388,6 +382,12 @@ public class FabricHuskSync implements DedicatedServerModInitializer, HuskSync, 
     @Override
     public Optional<LegacyConverter> getLegacyConverter() {
         return Optional.empty();
+    }
+
+    @Override
+    @NotNull
+    public LockedHandler getLockedHandler() {
+        return eventListener;
     }
 
     @Override

@@ -31,6 +31,7 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.FormatStyle;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.StringJoiner;
 
@@ -59,7 +60,7 @@ public class DataSnapshotOverview {
         // Title message, timestamp, owner and cause.
         final Locales locales = plugin.getLocales();
         locales.getLocale("data_manager_title", snapshot.getShortId(), snapshot.getId().toString(),
-                        dataOwner.getUsername(), dataOwner.getUuid().toString())
+                        dataOwner.getName(), dataOwner.getUuid().toString())
                 .ifPresent(user::sendMessage);
         locales.getLocale("data_manager_timestamp",
                         snapshot.getTimestamp().format(DateTimeFormatter
@@ -101,19 +102,18 @@ public class DataSnapshotOverview {
                         .flatMap(statisticsData -> locales.getLocale("data_manager_advancements_statistics",
                                 Integer.toString(advancementData.getCompletedExcludingRecipes().size()),
                                 generateAdvancementPreview(advancementData.getCompletedExcludingRecipes(), locales),
-                                String.format("%.2f", (((statisticsData.getGenericStatistics().getOrDefault(
-                                        "minecraft:play_one_minute", 0)) / 20d) / 60d) / 60d))))
+                                getPlayTimeHours(statisticsData))))
                 .ifPresent(user::sendMessage);
 
         if (user.hasPermission("husksync.command.inventory.edit")
             && user.hasPermission("husksync.command.enderchest.edit")) {
-            locales.getLocale("data_manager_item_buttons", dataOwner.getUsername(), snapshot.getId().toString())
+            locales.getLocale("data_manager_item_buttons", dataOwner.getName(), snapshot.getId().toString())
                     .ifPresent(user::sendMessage);
         }
-        locales.getLocale("data_manager_management_buttons", dataOwner.getUsername(), snapshot.getId().toString())
+        locales.getLocale("data_manager_management_buttons", dataOwner.getName(), snapshot.getId().toString())
                 .ifPresent(user::sendMessage);
         if (user.hasPermission("husksync.command.userdata.dump")) {
-            locales.getLocale("data_manager_system_buttons", dataOwner.getUsername(), snapshot.getId().toString())
+            locales.getLocale("data_manager_system_buttons", dataOwner.getName(), snapshot.getId().toString())
                     .ifPresent(user::sendMessage);
         }
     }
@@ -135,6 +135,15 @@ public class DataSnapshotOverview {
                     .orElse(String.format("+%s…", remaining)));
         }
         return joiner.toString();
+    }
+
+    // Bukkit stores unprefixed key (play_time), Fabric stores fully namespaced key (minecraft:play_time)
+    @NotNull
+    private String getPlayTimeHours(@NotNull Data.Statistics statistics) {
+        final Map<String, Integer> generic = statistics.getGenericStatistics();
+        final int ticks = generic.containsKey("play_time") ? generic.get("play_time")
+                : generic.getOrDefault("minecraft:play_time", 0);
+        return String.format("%.2f", ((ticks / 20d) / 60d) / 60d);
     }
 
 }

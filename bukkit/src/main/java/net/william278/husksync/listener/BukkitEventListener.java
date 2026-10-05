@@ -19,6 +19,7 @@
 
 package net.william278.husksync.listener;
 
+import lombok.Getter;
 import net.william278.husksync.BukkitHuskSync;
 import net.william278.husksync.data.BukkitData;
 import net.william278.husksync.user.BukkitUser;
@@ -36,6 +37,7 @@ import org.jetbrains.annotations.NotNull;
 
 import java.util.stream.Collectors;
 
+@Getter
 public class BukkitEventListener extends EventListener implements BukkitJoinEventListener, BukkitQuitEventListener,
         BukkitDeathEventListener, Listener {
 
@@ -125,15 +127,15 @@ public class BukkitEventListener extends EventListener implements BukkitJoinEven
         }
 
         // Handle saving player data snapshots when the world saves
-        plugin.runAsync(() -> super.saveOnWorldSave(event.getWorld().getPlayers()
+        super.saveOnWorldSave(event.getWorld().getPlayers()
                 .stream().map(player -> BukkitUser.adapt(player, plugin))
-                .collect(Collectors.toList())));
+                .collect(Collectors.toList()));
     }
 
     @EventHandler(ignoreCancelled = true)
     public void onMapInitialize(@NotNull MapInitializeEvent event) {
         if (plugin.getSettings().getSynchronization().isPersistLockedMaps() && event.getMap().isLocked()) {
-            getPlugin().runAsync(() -> ((BukkitHuskSync) plugin).renderMapFromFile(event.getMap()));
+            getPlugin().runAsync(() -> ((BukkitHuskSync) plugin).renderInitializingLockedMap(event.getMap()));
         }
     }
 

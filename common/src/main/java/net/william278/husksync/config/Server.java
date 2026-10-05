@@ -22,13 +22,11 @@ package net.william278.husksync.config;
 import de.exlll.configlib.Configuration;
 import lombok.AccessLevel;
 import lombok.AllArgsConstructor;
-import lombok.Getter;
 import lombok.NoArgsConstructor;
 import org.jetbrains.annotations.NotNull;
 
 import java.nio.file.Path;
 
-@Getter
 @Configuration
 @NoArgsConstructor(access = AccessLevel.PRIVATE)
 @AllArgsConstructor(access = AccessLevel.PRIVATE)
@@ -40,7 +38,8 @@ public class Server {
             ┃    Developed by William278   ┃
             ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
             ┣╸ This file should contain the ID of this server as defined in your proxy config.
-            ┗╸ If you join it using /server alpha, then set it to 'alpha' (case-sensitive)""";
+            ┣╸ If you join it using /server alpha, then set it to 'alpha' (case-sensitive)
+            ┗╸ You can also set the environment variable HUSKSYNC_SERVER_NAME to override this value""";
 
     private String name = getDefault();
 
@@ -66,5 +65,9 @@ public class Server {
         }
         return super.equals(other);
     }
-
+  
+    public String getName() {
+        final String envServerName = System.getenv("HUSKSYNC_SERVER_NAME");
+        return envServerName == null ? name : envServerName;
+    }
 }

@@ -20,6 +20,7 @@
 package net.william278.husksync;
 
 import com.fatboyindustrial.gsonjavatime.Converters;
+import com.google.common.collect.Maps;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import net.kyori.adventure.audience.Audience;
@@ -34,14 +35,13 @@ import net.william278.husksync.data.Identifier;
 import net.william278.husksync.data.SerializerRegistry;
 import net.william278.husksync.database.Database;
 import net.william278.husksync.event.EventDispatcher;
+import net.william278.husksync.listener.LockedHandler;
 import net.william278.husksync.migrator.Migrator;
 import net.william278.husksync.redis.RedisManager;
 import net.william278.husksync.sync.DataSyncer;
 import net.william278.husksync.user.ConsoleUser;
 import net.william278.husksync.user.OnlineUser;
-import net.william278.husksync.util.CompatibilityChecker;
-import net.william278.husksync.util.LegacyConverter;
-import net.william278.husksync.util.Task;
+import net.william278.husksync.util.*;
 import net.william278.uniform.Uniform;
 import org.jetbrains.annotations.NotNull;
 
@@ -54,7 +54,7 @@ import java.util.logging.Level;
  * Abstract implementation of the HuskSync plugin.
  */
 public interface HuskSync extends Task.Supplier, EventDispatcher, ConfigProvider, SerializerRegistry,
-        CompatibilityChecker {
+        CompatibilityChecker, DumpProvider, DataVersionSupplier {
 
     int SPIGOT_RESOURCE_ID = 97144;
 
@@ -138,7 +138,7 @@ public interface HuskSync extends Task.Supplier, EventDispatcher, ConfigProvider
         if (getPlayerCustomDataStore().containsKey(user.getUuid())) {
             return getPlayerCustomDataStore().get(user.getUuid());
         }
-        final Map<Identifier, Data> data = new HashMap<>();
+        final Map<Identifier, Data> data = Maps.newHashMap();
         getPlayerCustomDataStore().put(user.getUuid(), data);
         return data;
     }
@@ -250,14 +250,6 @@ public interface HuskSync extends Task.Supplier, EventDispatcher, ConfigProvider
     Version getMinecraftVersion();
 
     /**
-     * Returns the data version for a Minecraft version
-     *
-     * @param minecraftVersion the Minecraft version
-     * @return the data version int
-     */
-    int getDataVersion(@NotNull Version minecraftVersion);
-
-    /**
      * Returns the platform type
      *
      * @return the platform type
@@ -302,6 +294,9 @@ public interface HuskSync extends Task.Supplier, EventDispatcher, ConfigProvider
         }
     }
 
+    @NotNull
+    LockedHandler getLockedHandler();
+
     /**
      * Get the set of UUIDs of "locked players", for which events will be canceled.
      * </p>
@@ -309,6 +304,12 @@ public interface HuskSync extends Task.Supplier, EventDispatcher, ConfigProvider
      */
     @NotNull
     Set<UUID> getLockedPlayers();
+
+    /**
+     * Get the set of UUIDs of players who are currently marked as disconnecting or disconnected
+     */
+    @NotNull
+    Set<UUID> getDisconnectingPlayers();
 
     default boolean isLocked(@NotNull UUID uuid) {
         return getLockedPlayers().contains(uuid);
@@ -340,12 +341,12 @@ public interface HuskSync extends Task.Supplier, EventDispatcher, ConfigProvider
         private static final String FORMAT = """
                 HuskSync has failed to load! The plugin will not be enabled and no data will be synchronized.
                 Please make sure the plugin has been setup correctly (https://william278.net/docs/husksync/setup):
-                                
+                
                 1) Make sure you've entered your MySQL, MariaDB or MongoDB database details correctly in config.yml
                 2) Make sure your Redis server details are also correct in config.yml
                 3) Make sure your config is up-to-date (https://william278.net/docs/husksync/config-file)
                 4) Check the error below for more details
-                                
+                
                 Caused by: %s""";
 
         public FailedToLoadException(@NotNull String message) {

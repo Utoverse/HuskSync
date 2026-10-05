@@ -1,10 +1,11 @@
 import org.apache.tools.ant.filters.ReplaceTokens
 
 plugins {
-    id 'com.gradleup.shadow' version '8.3.5'
-    id 'org.cadixdev.licenser' version '0.6.1' apply false
-    id 'fabric-loom' version "$fabric_loom_version" apply false
-    id 'org.ajoberstar.grgit' version '5.3.0'
+    id 'com.gradleup.shadow' version '9.5.1'
+    id 'net.neoforged.licenser' version '0.7.5' apply false
+    id 'dev.architectury.loom' version '1.9-SNAPSHOT' apply false
+    id 'gg.essential.multi-version.root' apply false
+    id 'org.ajoberstar.grgit' version '5.3.2'
     id 'maven-publish'
     id 'java'
 }
@@ -18,8 +19,8 @@ ext {
     set 'version', version.toString()
     set 'description', description.toString()
 
-    set 'minecraft_version', minecraft_version.toString()
-    set 'jedis_version', jedis_version.toString()
+    set 'lettuce_version', lettuce_version.toString()
+    set 'commons_pool_version', commons_pool_version.toString()
     set 'mysql_driver_version', mysql_driver_version.toString()
     set 'mariadb_driver_version', mariadb_driver_version.toString()
     set 'postgres_driver_version', postgres_driver_version.toString()
@@ -59,15 +60,20 @@ publishing {
 }
 
 allprojects {
+    // Ignore parent projects (no jars)
+    if (project.name == 'fabric' || project.name == 'bukkit') {
+        return
+    }
+    
     apply plugin: 'com.gradleup.shadow'
-    apply plugin: 'org.cadixdev.licenser'
+    apply plugin: 'net.neoforged.licenser'
     apply plugin: 'java'
 
     compileJava.options.encoding = 'UTF-8'
-    compileJava.options.compilerArgs += ['-Xlint:unchecked', '-Xlint:deprecation']
-    compileJava.options.release.set Integer.parseInt(rootProject.ext.javaVersion)
+    compileJava.options.release.set 17
     javadoc.options.encoding = 'UTF-8'
     javadoc.options.addStringOption('Xdoclint:none', '-quiet')
+    javadoc.options.tags = ['apiNote:a:API Note:', 'implNote:a:Implementation Note:']
 
     repositories {
         mavenLocal()
@@ -76,7 +82,6 @@ allprojects {
         maven { url 'https://oss.sonatype.org/content/repositories/snapshots' }
         maven { url 'https://hub.spigotmc.org/nexus/content/repositories/snapshots/' }
         maven { url 'https://repo.papermc.io/repository/maven-public/' }
-        maven { url "https://repo.dmulloy2.net/repository/public/" }
         maven { url 'https://repo.codemc.io/repository/maven-public/' }
         maven { url 'https://repo.minebench.de/' }
         maven { url 'https://repo.alessiodp.com/releases/' }
@@ -86,13 +91,10 @@ allprojects {
     }
 
     dependencies {
-        testImplementation 'org.junit.jupiter:junit-jupiter-api:5.11.3'
-        testImplementation 'org.junit.jupiter:junit-jupiter-params:5.11.3'
-        testImplementation 'org.junit.jupiter:junit-jupiter-engine:5.11.3'
-    }
-
-    test {
-        useJUnitPlatform()
+        testImplementation(platform("org.junit:junit-bom:6.1.2"))
+        testImplementation 'org.junit.jupiter:junit-jupiter'
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+        testCompileOnly 'org.jetbrains:annotations:26.1.0'
     }
 
     license {
@@ -101,9 +103,13 @@ allprojects {
         newLine = true
     }
 
+    test {
+        useJUnitPlatform()
+    }
+
     processResources {
         def tokenMap = rootProject.ext.properties
-        tokenMap.merge("grgit",'',(s, s2) -> s)
+        tokenMap.merge("grgit", '', (s, s2) -> s)
         filesMatching(['**/*.json', '**/*.yml']) {
             filter ReplaceTokens as Class, beginToken: '${', endToken: '}',
                     tokens: tokenMap
@@ -112,12 +118,36 @@ allprojects {
 }
 
 subprojects {
-    if (['fabric'].contains(project.name)) {
-        apply plugin: 'fabric-loom'
+    // Ignore parent projects (no jars)
+    if (['fabric', 'bukkit'].contains(project.name)) {
+        return
     }
 
+    // Project naming
     version rootProject.version
-    archivesBaseName = "${rootProject.name}-${project.name.capitalize()}"
+    def name = "$rootProject.name"
+    if (rootProject != project.parent) {
+        name += "-${project.parent.name.capitalize()}"
+    } else {
+        name += "-${project.name.capitalize()}"
+    }
+    base.archivesName = name
+
+    // Version-specific configuration
+    if (['fabric', 'bukkit'].contains(project.parent?.name)) {
+        def javaVer = project.hasProperty('java_version') ? Integer.parseInt(project.java_version as String) : 25
+        java {
+            toolchain {
+                languageVersion = JavaLanguageVersion.of(javaVer)
+            }
+        }
+        compileJava.options.release.set javaVer
+        version += "+mc.${project.name}"
+
+        if (project.parent?.name?.equals('fabric')) {
+            apply plugin: 'dev.architectury.loom'
+        }
+    }
 
     jar {
         from '../LICENSE'
@@ -128,13 +158,8 @@ subprojects {
         archiveClassifier.set('')
     }
 
-    // Append the compatible Minecraft version to the version
-    if (['bukkit', 'paper', 'fabric'].contains(project.name)) {
-        version += "+mc.${minecraft_version}"
-    }
-
     // API publishing
-    if (['common', 'bukkit', 'fabric'].contains(project.name)) {
+    if (project.name == 'common' || ['fabric', 'bukkit'].contains(project.parent?.name)) {
         java {
             withSourcesJar()
             withJavadocJar()
@@ -161,12 +186,12 @@ subprojects {
                 }
             }
 
-            if (['bukkit'].contains(project.name)) {
+            if (project.parent?.name?.equals('bukkit')) {
                 publications {
-                    mavenJavaBukkit(MavenPublication) {
+                    "mavenJavaBukkit_${project.name.replace('.', '_')}"(MavenPublication) {
                         groupId = 'net.william278.husksync'
                         artifactId = 'husksync-bukkit'
-                        version = "$rootProject.version+${minecraft_version}"
+                        version = "$rootProject.version+$project.name"
                         artifact shadowJar
                         artifact sourcesJar
                         artifact javadocJar
@@ -174,12 +199,12 @@ subprojects {
                 }
             }
 
-            if (['fabric'].contains(project.name)) {
+            if (project.parent?.name?.equals('fabric')) {
                 publications {
-                    mavenJavaFabric(MavenPublication) {
+                    "mavenJavaFabric_${project.name.replace('.', '_')}"(MavenPublication) {
                         groupId = 'net.william278.husksync'
                         artifactId = 'husksync-fabric'
-                        version = "$rootProject.version+${minecraft_version}"
+                        version = "$rootProject.version+$project.name"
                         artifact remapJar
                         artifact sourcesJar
                         artifact javadocJar
@@ -189,19 +214,14 @@ subprojects {
         }
     }
 
-    jar.dependsOn(shadowJar)
+    jar.dependsOn shadowJar
     clean.delete "$rootDir/target"
 }
 
-logger.lifecycle("Building HuskSync ${version} by William278 for Minecraft ${minecraft_version}")
+logger.lifecycle("Building HuskSync ${version} by William278")
 
 @SuppressWarnings('GrMethodMayBeStatic')
 def versionMetadata() {
-    // If the force-hide-version-meta environment variable is set, return ''
-    if (System.getProperty('force-hide-version-meta') != null) {
-        return ''
-    }
-
     // Require grgit
     if (grgit == null) {
         return '-unknown'
@@ -209,7 +229,7 @@ def versionMetadata() {
 
     // If unclean, return the last commit hash with -indev
     if (!grgit.status().clean) {
-        return '-' + grgit.head().abbreviatedId  + '-indev'
+        return '-' + grgit.head().abbreviatedId + '-indev'
     }
 
     // Otherwise if this matches a tag, return nothing
